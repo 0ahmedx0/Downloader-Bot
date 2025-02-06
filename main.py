@@ -17,7 +17,6 @@ logging.basicConfig(level=logging.INFO)
 custom_timeout = 600  # 10 minutes
 
 session = AiohttpSession(
-    api=TelegramAPIServer.from_base(custom_api_url),
     timeout=custom_timeout
 )
 
