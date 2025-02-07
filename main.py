@@ -30,10 +30,8 @@ db = DataBase()
 
 os.makedirs("downloads", exist_ok=True)
 
-async def send_analytics(user_id, chat_type, action_name):
-    if not SEND_ANALYTICS:
-        return  # الخروج مباشرةً بدون تنفيذ أي شيء
 
+async def send_analytics(user_id, chat_type, action_name):
     params = {
         'client_id': str(user_id),
         'user_id': str(user_id),
