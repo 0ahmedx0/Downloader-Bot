@@ -43,10 +43,6 @@ async def send_analytics(user_id, chat_type, action_name):
             }
         }],
     }
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f'https://www.google-analytics.com/mp/collect?measurement_id={MEASUREMENT_ID}&api_secret={API_SECRET}',
-            json=params)
 
 
 async def main():
