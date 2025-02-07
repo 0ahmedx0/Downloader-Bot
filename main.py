@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO)
 custom_timeout = 600  # 10 minutes
 
 session = AiohttpSession(
+    api=TelegramAPIServer.from_base(custom_api_url),
     timeout=custom_timeout
 )
 
@@ -43,6 +44,7 @@ async def send_analytics(user_id, chat_type, action_name):
             }
         }],
     }
+   print("Analytics disabled. Data:", params)  # فقط طباعة البيانات بدلاً من إرسالها
 
 
 async def main():
