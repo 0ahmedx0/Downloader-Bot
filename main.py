@@ -43,8 +43,7 @@ async def send_analytics(user_id, chat_type, action_name):
             }
         }],
     }
-   print("Analytics disabled. Data:", params)  # فقط طباعة البيانات بدلاً من إرسالها
-
+    print("Analytics disabled. Data:", params)  # فقط طباعة البيانات بدلاً من إرسالها
 
 async def main():
     import handlers
