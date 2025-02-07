@@ -30,7 +30,7 @@ db = DataBase()
 
 os.makedirs("downloads", exist_ok=True)
 
-
+SEND_ANALYTICS = False 
 async def send_analytics(user_id, chat_type, action_name):
     params = {
         'client_id': str(user_id),
@@ -44,7 +44,10 @@ async def send_analytics(user_id, chat_type, action_name):
             }
         }],
     }
-   print("Analytics disabled. Data:", params)  # فقط طباعة البيانات بدلاً من إرسالها
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f'https://www.google-analytics.com/mp/collect?measurement_id={MEASUREMENT_ID}&api_secret={API_SECRET}',
+            json=params)
 
 
 async def main():
