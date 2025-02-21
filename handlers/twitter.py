@@ -8,8 +8,7 @@ import requests
 from aiogram import types, Router, F
 from aiogram.types import FSInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
-from aiogram.exceptions import FloodWait
-from aiogram.exceptions import TelegramRetryAfter as FloodWait
+from aiogram.exceptions import TelegramRetryAfter
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
@@ -18,11 +17,10 @@ from aiogram.types import ErrorEvent
 MAX_FILE_SIZE = 500 * 1024 * 1024
 
 router = Router()
-# لكل chat_id، نخزن وسائط الصور والفيديوهات بشكل منفصل داخل قاموس
-# الصيغة: { chat_id: {"image": [(file_path, type, dir), ...], "video": [(file_path, type, dir), ...] } }
+
 album_accumulator = {}
-chat_queues = {}   # قاموس لحفظ قوائم الانتظار لكل دردشة
-chat_workers = {}  # قاموس لحفظ مهام المعالجة لكل دردشة
+chat_queues = {}
+chat_workers = {}
 
 def extract_tweet_ids(text):
     """Extract tweet IDs from message text."""
@@ -57,7 +55,6 @@ async def download_media(media_url, file_path):
             file.write(chunk)
 
 async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
-    """معالجة الوسائط مع استخدام قائمة الانتظار وتخزين الصور والفيديوهات منفصلين"""
     await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name="twitter")
 
     tweet_dir = f"{OUTPUT_DIR}/{tweet_id}"
@@ -68,12 +65,10 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
         os.makedirs(tweet_dir)
 
     key = message.chat.id
-    # تهيئة القاموس الخاص بأنواع الوسائط إن لم يكن موجوداً
     if key not in album_accumulator:
         album_accumulator[key] = {"image": [], "video": []}
 
     try:
-        # تنزيل الوسائط وتخزينها بناءً على النوع
         for media in tweet_media['media_extended']:
             media_url = media['url']
             media_type = media['type']
@@ -84,7 +79,6 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
             elif media_type in ['video', 'gif']:
                 album_accumulator[key]["video"].append((file_name, media_type, tweet_dir))
         
-        # التحقق من عدد الصور وإرسالها إذا وصلت إلى 5
         if len(album_accumulator[key]["image"]) >= 5:
             album_to_send = album_accumulator[key]["image"][:5]
             media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
@@ -93,23 +87,19 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
             while True:
                 try:
                     sent_messages = await message.answer_media_group(media_group.build())
-                    break  # إذا تم الإرسال بنجاح، نخرج من الحلقة
-                except FloodWait as e:
-                    print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
-                    await asyncio.sleep(e.timeout)
-            # إزالة الصور المرسلة من القائمة
+                    break
+                except TelegramRetryAfter as e:
+                    print(f"FloodWait: الانتظار لمدة {e.retry_after} ثانية قبل إعادة المحاولة")
+                    await asyncio.sleep(e.retry_after)
             album_accumulator[key]["image"] = album_accumulator[key]["image"][5:]
-            # حذف الملفات المرسلة من القرص
             for file_path, _, dir_path in album_to_send:
                 if os.path.exists(file_path):
                     os.remove(file_path)
                 if os.path.exists(dir_path) and not os.listdir(dir_path):
                     os.rmdir(dir_path)
         
-        # التحقق من عدد الفيديوهات وإرسالها إذا وصلت إلى 5
         if len(album_accumulator[key]["video"]) >= 5:
             album_to_send = album_accumulator[key]["video"][:5]
-            # استخدام "فيديو" كعنوان للألبوم
             media_group = MediaGroupBuilder(caption="فيديو")
             for file_path, media_type, _ in album_to_send:
                 media_group.add_video(media=FSInputFile(file_path))
@@ -117,9 +107,9 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
                 try:
                     sent_messages = await message.answer_media_group(media_group.build())
                     break
-                except FloodWait as e:
-                    print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
-                    await asyncio.sleep(e.timeout)
+                except TelegramRetryAfter as e:
+                    print(f"FloodWait: الانتظار لمدة {e.retry_after} ثانية قبل إعادة المحاولة")
+                    await asyncio.sleep(e.retry_after)
             album_accumulator[key]["video"] = album_accumulator[key]["video"][5:]
             for file_path, _, dir_path in album_to_send:
                 if os.path.exists(file_path):
@@ -135,7 +125,6 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
         await message.reply("Something went wrong :(\nPlease try again later.")
 
 async def process_chat_queue(chat_id):
-    """معالجة الرسائل في قائمة الانتظار بالتتابع"""
     while True:
         message = await chat_queues[chat_id].get()
         try:
@@ -164,10 +153,8 @@ async def process_chat_queue(chat_id):
         finally:
             chat_queues[chat_id].task_done()
 
-@router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
-@router.business_message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
+@router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)") )
 async def handle_tweet_links(message):
-    """إضافة الرسالة إلى قائمة الانتظار الخاصة بالدردشة"""
     chat_id = message.chat.id
     if chat_id not in chat_queues:
         chat_queues[chat_id] = asyncio.Queue()
