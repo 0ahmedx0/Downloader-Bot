@@ -150,6 +150,11 @@ async def handle_tweet_links(message):
         for tweet_id in tweet_ids:
             media = scrape_media(tweet_id)
             await reply_media(message, tweet_id, media, bot_url, business_id)
+        # بعد الانتهاء من معالجة جميع التغريدات، نقوم بحذف رسالة المستخدم
+        try:
+            await message.delete()
+        except Exception as delete_error:
+            print(f"Error deleting message: {delete_error}")
     else:
         if business_id is None:
             react = types.ReactionTypeEmoji(emoji="👎")
