@@ -33,7 +33,6 @@ def extract_tweet_ids(text):
     tweet_ids = re.findall(r"(?:twitter|x)\.com/.{1,15}/(?:web|status(?:es)?)/([0-9]{1,20})", text + unshortened_links)
     return list(dict.fromkeys(tweet_ids)) if tweet_ids else None
 
-
 def scrape_media(tweet_id):
     r = requests.get(f'https://api.vxtwitter.com/Twitter/status/{tweet_id}')
     r.raise_for_status()
@@ -44,14 +43,12 @@ def scrape_media(tweet_id):
             raise Exception(f'API returned error: {html.unescape(match.group(1))}')
         raise
 
-
 async def download_media(media_url, file_path):
     response = requests.get(media_url, stream=True)
     response.raise_for_status()
     with open(file_path, 'wb') as file:
         for chunk in response.iter_content(chunk_size=8192):
             file.write(chunk)
-
 
 async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
     """معالجة الوسائط مع استخدام قائمة الانتظار"""
@@ -80,8 +77,9 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
             album_accumulator[key] = []
         album_accumulator[key].extend(downloaded_files)
 
-        if len(album_accumulator[key]) >= 10:
-            album_to_send = album_accumulator[key][:10]
+        # إرسال الألبوم عند تجميع 5 وسائط
+        if len(album_accumulator[key]) >= 5:
+            album_to_send = album_accumulator[key][:5]
             media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
             for file_path, media_type, _ in album_to_send:
                 if media_type == 'image':
@@ -100,7 +98,8 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
                     file_id = msg.video.file_id
                     channel_media.append(types.InputMediaVideo(media=file_id))
 
-            album_accumulator[key] = album_accumulator[key][10:]
+            # إزالة أول 5 وسائط من المُجمّع
+            album_accumulator[key] = album_accumulator[key][5:]
 
             #await asyncio.sleep(10)
             #await bot.send_media_group(chat_id=CHANNEL_IDtwiter, media=channel_media)
@@ -117,7 +116,6 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
             react = types.ReactionTypeEmoji(emoji="👎")
             await message.react([react])
         await message.reply("Something went wrong :(\nPlease try again later.")
-
 
 async def process_chat_queue(chat_id):
     """معالجة الرسائل في قائمة الانتظار بالتتابع"""
@@ -154,7 +152,6 @@ async def process_chat_queue(chat_id):
 
         finally:
             chat_queues[chat_id].task_done()
-
 
 @router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
 @router.business_message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
