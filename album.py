@@ -18,8 +18,20 @@ from telegram.ext import (
 from telegram.error import RetryAfter  # استيراد الخطأ الخاص بالفيضانات
 
 # تعيين معرف القناة في متغيرات البيئة
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-
+raw_channel_id = os.getenv("CHANNEL_ID")
+if raw_channel_id:
+    # إذا كانت القيمة تبدأ بـ '@' نستخدمها كنص
+    if raw_channel_id.startswith("@"):
+        CHANNEL_ID = raw_channel_id
+    else:
+        try:
+            CHANNEL_ID = int(raw_channel_id)
+        except ValueError:
+            # إذا حدث خطأ في التحويل، نستخدم القيمة كنص
+            CHANNEL_ID = raw_channel_id
+else:
+    CHANNEL_ID = None
+    
 # إعداد التسجيل
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
