@@ -90,15 +90,19 @@ async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     media_queue = context.user_data.get("media_queue", [])
-    if len(media_queue) < 2:
+    total_videos = len(media_queue)
+    if total_videos < 2:
         await update.message.reply_text(MESSAGES["not_enough_media_items"])
         return
 
+    logger.info("Starting album conversion. Total videos stored: %d", total_videos)
+
     # تقسيم الوسائط إلى مجموعات بحد أقصى 10 عناصر لكل مجموعة
-    chunks = [media_queue[i: i + 10] for i in range(0, len(media_queue), 10)]
+    chunks = [media_queue[i: i + 10] for i in range(0, total_videos, 10)]
     channel_id = os.environ.get("CHANNEL_ID")
-    
-    for chunk in chunks:
+    processed = 0
+
+    for index, chunk in enumerate(chunks):
         input_media = []
         for item in chunk:
             if item["type"] == "photo":
@@ -112,11 +116,13 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             if channel_id:
                 await context.bot.send_media_group(chat_id=channel_id, media=input_media)
         except Exception as e:
-            logger.error("Error sending album: %s", e)
+            logger.error("Error sending album chunk %d: %s", index + 1, e)
             await update.message.reply_text(
                 "Something went wrong while sending the album. Please try again in a minute or contact us."
             )
-        # الانتظار لمدة 5 ثواني قبل إرسال المجموعة التالية
+        processed += len(chunk)
+        remaining = total_videos - processed
+        logger.info("Processed chunk %d. Remaining videos: %d", index + 1, remaining)
         await asyncio.sleep(5)
     
     # تفريغ قائمة الوسائط بعد الانتهاء
