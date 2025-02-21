@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 from telegram import (
     Update,
@@ -15,13 +16,16 @@ from telegram.ext import (
     filters,
 )
 
-# إعداد تسجيل الأخطاء
+# تعيين معرف القناة في متغيرات البيئة
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+
+# إعداد التسجيل
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# تعريف الرسائل المستخدمة (يمكن لاحقًا توسيعها لدعم لغات متعددة)
+# الرسائل المستخدمة (يمكن توسعتها لدعم لغات متعددة لاحقاً)
 MESSAGES = {
     "greeting": (
         "Hello {username}! Have you ever found some wonderful images on Telegram, "
@@ -91,7 +95,9 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     # تقسيم الوسائط إلى مجموعات بحد أقصى 10 عناصر لكل مجموعة
-    chunks = [media_queue[i : i + 10] for i in range(0, len(media_queue), 10)]
+    chunks = [media_queue[i: i + 10] for i in range(0, len(media_queue), 10)]
+    channel_id = os.environ.get("CHANNEL_ID")
+    
     for chunk in chunks:
         input_media = []
         for item in chunk:
@@ -100,13 +106,20 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             elif item["type"] == "video":
                 input_media.append(InputMediaVideo(media=item["media"]))
         try:
+            # إرسال المجموعة للمستخدم
             await update.message.reply_media_group(media=input_media)
+            # إرسال المجموعة إلى القناة لحفظها
+            if channel_id:
+                await context.bot.send_media_group(chat_id=channel_id, media=input_media)
         except Exception as e:
             logger.error("Error sending album: %s", e)
             await update.message.reply_text(
                 "Something went wrong while sending the album. Please try again in a minute or contact us."
             )
-    # بعد الإرسال يتم مسح قائمة الوسائط
+        # الانتظار لمدة 5 ثواني قبل إرسال المجموعة التالية
+        await asyncio.sleep(5)
+    
+    # تفريغ قائمة الوسائط بعد الانتهاء
     context.user_data["media_queue"] = []
 
 
@@ -133,11 +146,15 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.PHOTO, add_photo))
     application.add_handler(MessageHandler(filters.VIDEO, add_video))
 
-    # معالجات رسائل لوحة المفاتيح (النصوص الثابتة)
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_done']}$"), create_album))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$"), reset_album))
+    # معالجات رسائل لوحة المفاتيح
+    application.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_done']}$"), create_album)
+    )
+    application.add_handler(
+        MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$"), reset_album)
+    )
 
-    # بدء البوت بطريقة long polling
+    # بدء البوت باستخدام long polling
     application.run_polling()
 
 
