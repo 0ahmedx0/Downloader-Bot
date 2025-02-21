@@ -52,53 +52,57 @@ async def download_media(media_url, file_path):
 
 
 async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
-    """Reply to message with supported media as album when reaching 10 items."""
+    """Reply to message with supported media as album only when accumulated files reach 10."""
     await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name="twitter")
 
     tweet_dir = f"{OUTPUT_DIR}/{tweet_id}"
     post_caption = tweet_media["text"]
     user_captions = await db.get_user_captions(message.from_user.id)
 
+    # تأكد من وجود المجلد الخاص بالتغريدة
     if not os.path.exists(tweet_dir):
         os.makedirs(tweet_dir)
 
-    downloaded_files = []  # قائمة لتجميع الملفات التي تم تنزيلها
+    downloaded_files = []  # ستحتوي على tuples: (file_path, media_type, tweet_dir)
 
     try:
+        # تحميل جميع الوسائط من التغريدة
         for media in tweet_media['media_extended']:
             media_url = media['url']
             media_type = media['type']
             file_name = os.path.join(tweet_dir, os.path.basename(urlsplit(media_url).path))
             await download_media(media_url, file_name)
-            # سنضيف جميع أنواع الوسائط (صور وفيديوهات) إلى القائمة
+            # نضيف فقط الصور والفيديوهات والـ GIF
             if media_type in ['image', 'video', 'gif']:
-                downloaded_files.append((file_name, media_type))
+                downloaded_files.append((file_name, media_type, tweet_dir))
 
-        # نجمع الملفات المُحمَّلة في المُجمِّع العالمي باستخدام معرف الدردشة كمفتاح
+        # تجميع الملفات المُحمَّلة في المُجمّع العالمي باستخدام معرف الدردشة كمفتاح
         key = message.chat.id
         if key not in album_accumulator:
             album_accumulator[key] = []
         album_accumulator[key].extend(downloaded_files)
 
-        # نتحقق من عدد الوسائط المُجمَّعة؛ إذا وصلت إلى 10 أو أكثر نقوم بإرسال ألبوم
+        # إذا وصل العدد إلى 10 أو أكثر، نبني الألبوم ونرسله
         if len(album_accumulator[key]) >= 10:
             media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
-            # نأخذ أول 10 عناصر فقط
-            for file_path, media_type in album_accumulator[key][:10]:
+            # نختار أول 10 عناصر
+            album_to_send = album_accumulator[key][:10]
+            for file_path, media_type, _ in album_to_send:
                 if media_type == 'image':
                     media_group.add_photo(media=FSInputFile(file_path))
                 elif media_type in ['video', 'gif']:
                     media_group.add_video(media=FSInputFile(file_path))
             await message.answer_media_group(media_group.build())
-            # بعد الإرسال، نحذف العناصر المرسلة من المُجمِّع
-            album_accumulator[key] = album_accumulator[key][10:]
 
-        # حذف الملفات من المجلد بعد التنزيل (يمكنك نقل هذه العملية إلى مرحلة لاحقة إذا رغبت بالحفاظ على الملفات مؤقتًا)
-        await asyncio.sleep(5)
-        for root, dirs, files in os.walk(tweet_dir):
-            for file in files:
-                os.remove(os.path.join(root, file))
-        os.rmdir(tweet_dir)
+            # بعد الإرسال، نحذف الملفات المستخدمة من القرص
+            for file_path, _, dir_path in album_to_send:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                # إذا كان المجلد فارغ، نقوم بحذفه
+                if os.path.exists(dir_path) and not os.listdir(dir_path):
+                    os.rmdir(dir_path)
+            # إزالة العناصر المرسلة من المُجمّع
+            album_accumulator[key] = album_accumulator[key][10:]
 
     except Exception as e:
         print(e)
@@ -106,6 +110,7 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
             react = types.ReactionTypeEmoji(emoji="👎")
             await message.react([react])
         await message.reply("Something went wrong :(\nPlease try again later.")
+
 
 
 @router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
