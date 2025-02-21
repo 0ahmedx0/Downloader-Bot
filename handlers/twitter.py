@@ -17,9 +17,10 @@ MAX_FILE_SIZE = 500 * 1024 * 1024
 
 router = Router()
 # لكل chat_id، نخزن وسائط الصور والفيديوهات بشكل منفصل داخل قاموس
-album_accumulator = {}  # الصيغة: { chat_id: {"image": [(file_path, type, dir), ...], "video": [...] } }
-chat_queues = {}        # قاموس لحفظ قوائم الانتظار لكل دردشة
-chat_workers = {}       # قاموس لحفظ مهام المعالجة لكل دردشة
+# الصيغة: { chat_id: {"image": [(file_path, type, dir), ...], "video": [(file_path, type, dir), ...] } }
+album_accumulator = {}
+chat_queues = {}   # قاموس لحفظ قوائم الانتظار لكل دردشة
+chat_workers = {}  # قاموس لحفظ مهام المعالجة لكل دردشة
 
 def extract_tweet_ids(text):
     """Extract tweet IDs from message text."""
@@ -30,8 +31,10 @@ def extract_tweet_ids(text):
             unshortened_links += '\n' + unshortened_link
         except:
             pass
-
-    tweet_ids = re.findall(r"(?:twitter|x)\.com/.{1,15}/(?:web|status(?:es)?)/([0-9]{1,20})", text + unshortened_links)
+    tweet_ids = re.findall(
+        r"(?:twitter|x)\.com/.{1,15}/(?:web|status(?:es)?)/([0-9]{1,20})", 
+        text + unshortened_links
+    )
     return list(dict.fromkeys(tweet_ids)) if tweet_ids else None
 
 def scrape_media(tweet_id):
@@ -79,49 +82,48 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
             elif media_type in ['video', 'gif']:
                 album_accumulator[key]["video"].append((file_name, media_type, tweet_dir))
         
-            # التحقق من عدد الصور
-            # مثال ضمن دالة reply_media لإرسال مجموعة الصور:
-    if len(album_accumulator[key]["image"]) >= 5:
-    album_to_send = album_accumulator[key]["image"][:5]
-    media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
-    for file_path, media_type, _ in album_to_send:
-        media_group.add_photo(media=FSInputFile(file_path))
-    while True:
-        try:
-            sent_messages = await message.answer_media_group(media_group.build())
-            break  # إذا تم الإرسال بنجاح، نخرج من الحلقة
-        except FloodWait as e:
-            print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
-            await asyncio.sleep(e.timeout)
-    # إزالة الصور المرسلة من القائمة
-    album_accumulator[key]["image"] = album_accumulator[key]["image"][5:]
-    # حذف الملفات المرسلة من القرص
-    for file_path, _, dir_path in album_to_send:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        if os.path.exists(dir_path) and not os.listdir(dir_path):
-            os.rmdir(dir_path)
-    
-    # مثال مشابه للفيديوهات:
-    if len(album_accumulator[key]["video"]) >= 5:
-        album_to_send = album_accumulator[key]["video"][:5]
-        # استخدام "فيديو" كعنوان للألبوم
-        media_group = MediaGroupBuilder(caption="فيديو")
-        for file_path, media_type, _ in album_to_send:
-            media_group.add_video(media=FSInputFile(file_path))
-        while True:
-            try:
-                sent_messages = await message.answer_media_group(media_group.build())
-                break
-            except FloodWait as e:
-                print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
-                await asyncio.sleep(e.timeout)
-        album_accumulator[key]["video"] = album_accumulator[key]["video"][5:]
-        for file_path, _, dir_path in album_to_send:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            if os.path.exists(dir_path) and not os.listdir(dir_path):
-                os.rmdir(dir_path)
+        # التحقق من عدد الصور وإرسالها إذا وصلت إلى 5
+        if len(album_accumulator[key]["image"]) >= 5:
+            album_to_send = album_accumulator[key]["image"][:5]
+            media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
+            for file_path, media_type, _ in album_to_send:
+                media_group.add_photo(media=FSInputFile(file_path))
+            while True:
+                try:
+                    sent_messages = await message.answer_media_group(media_group.build())
+                    break  # إذا تم الإرسال بنجاح، نخرج من الحلقة
+                except FloodWait as e:
+                    print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
+                    await asyncio.sleep(e.timeout)
+            # إزالة الصور المرسلة من القائمة
+            album_accumulator[key]["image"] = album_accumulator[key]["image"][5:]
+            # حذف الملفات المرسلة من القرص
+            for file_path, _, dir_path in album_to_send:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                if os.path.exists(dir_path) and not os.listdir(dir_path):
+                    os.rmdir(dir_path)
+        
+        # التحقق من عدد الفيديوهات وإرسالها إذا وصلت إلى 5
+        if len(album_accumulator[key]["video"]) >= 5:
+            album_to_send = album_accumulator[key]["video"][:5]
+            # استخدام "فيديو" كعنوان للألبوم
+            media_group = MediaGroupBuilder(caption="فيديو")
+            for file_path, media_type, _ in album_to_send:
+                media_group.add_video(media=FSInputFile(file_path))
+            while True:
+                try:
+                    sent_messages = await message.answer_media_group(media_group.build())
+                    break
+                except FloodWait as e:
+                    print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
+                    await asyncio.sleep(e.timeout)
+            album_accumulator[key]["video"] = album_accumulator[key]["video"][5:]
+            for file_path, _, dir_path in album_to_send:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                if os.path.exists(dir_path) and not os.listdir(dir_path):
+                    os.rmdir(dir_path)
 
     except Exception as e:
         print(e)
@@ -136,11 +138,9 @@ async def process_chat_queue(chat_id):
         message = await chat_queues[chat_id].get()
         try:
             business_id = message.business_connection_id
-
             if business_id is None:
                 react = types.ReactionTypeEmoji(emoji="👨‍💻")
                 await message.react([react])
-
             bot_url = f"t.me/{(await bot.get_me()).username}"
             tweet_ids = extract_tweet_ids(message.text)
             if tweet_ids:
