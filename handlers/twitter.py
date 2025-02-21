@@ -111,8 +111,8 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
             album_accumulator[key] = album_accumulator[key][10:]
 
             # تأخير 10 ثوانٍ قبل إرسال الألبوم للقناة
-            await asyncio.sleep(10)
-            await bot.send_media_group(chat_id=CHANNEL_IDtwiter, media=channel_media)
+            #await asyncio.sleep(10)
+            #await bot.send_media_group(chat_id=CHANNEL_IDtwiter, media=channel_media)
 
             # بعد الإرسال، حذف الملفات التي تم استخدامها من القرص
             for file_path, _, dir_path in album_to_send:
