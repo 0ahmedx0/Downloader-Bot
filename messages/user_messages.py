@@ -17,7 +17,7 @@ def captions_settings():
 
 
 def captions(user_captions, post_caption, bot_url):
-    return "حصريات"
+    return "حصريات🌈"
 
 
 
