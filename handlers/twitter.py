@@ -16,7 +16,7 @@ from main import bot, db, send_analytics
 MAX_FILE_SIZE = 500 * 1024 * 1024
 
 router = Router()
-
+album_accumulator = {}
 
 def extract_tweet_ids(text):
     """Extract tweet IDs from message text."""
@@ -52,7 +52,7 @@ async def download_media(media_url, file_path):
 
 
 async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
-    """Reply to message with supported media."""
+    """Reply to message with supported media as album when reaching 10 items."""
     await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name="twitter")
 
     tweet_dir = f"{OUTPUT_DIR}/{tweet_id}"
@@ -62,39 +62,39 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
     if not os.path.exists(tweet_dir):
         os.makedirs(tweet_dir)
 
-    all_files_photo = []
-    all_files_video = []
+    downloaded_files = []  # قائمة لتجميع الملفات التي تم تنزيلها
 
     try:
         for media in tweet_media['media_extended']:
             media_url = media['url']
             media_type = media['type']
             file_name = os.path.join(tweet_dir, os.path.basename(urlsplit(media_url).path))
-
             await download_media(media_url, file_name)
+            # سنضيف جميع أنواع الوسائط (صور وفيديوهات) إلى القائمة
+            if media_type in ['image', 'video', 'gif']:
+                downloaded_files.append((file_name, media_type))
 
-            if media_type == 'image':
-                all_files_photo.append(file_name)
-            elif media_type == 'video' or media_type == 'gif':
-                all_files_video.append(file_name)
+        # نجمع الملفات المُحمَّلة في المُجمِّع العالمي باستخدام معرف الدردشة كمفتاح
+        key = message.chat.id
+        if key not in album_accumulator:
+            album_accumulator[key] = []
+        album_accumulator[key].extend(downloaded_files)
 
-        while all_files_photo:
+        # نتحقق من عدد الوسائط المُجمَّعة؛ إذا وصلت إلى 10 أو أكثر نقوم بإرسال ألبوم
+        if len(album_accumulator[key]) >= 10:
             media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
-            for _ in range(min(10, len(all_files_photo))):
-                file_path = all_files_photo.pop(0)
-                media_group.add_photo(media=FSInputFile(file_path))
+            # نأخذ أول 10 عناصر فقط
+            for file_path, media_type in album_accumulator[key][:10]:
+                if media_type == 'image':
+                    media_group.add_photo(media=FSInputFile(file_path))
+                elif media_type in ['video', 'gif']:
+                    media_group.add_video(media=FSInputFile(file_path))
             await message.answer_media_group(media_group.build())
+            # بعد الإرسال، نحذف العناصر المرسلة من المُجمِّع
+            album_accumulator[key] = album_accumulator[key][10:]
 
-        while all_files_video:
-            media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
-            for _ in range(min(10, len(all_files_video))):
-                file_path = all_files_video.pop(0)
-                media_group.add_video(media=FSInputFile(file_path))
-            await message.answer_media_group(media_group.build())
-
+        # حذف الملفات من المجلد بعد التنزيل (يمكنك نقل هذه العملية إلى مرحلة لاحقة إذا رغبت بالحفاظ على الملفات مؤقتًا)
         await asyncio.sleep(5)
-
-        # Видалення папки після завантаження
         for root, dirs, files in os.walk(tweet_dir):
             for file in files:
                 os.remove(os.path.join(root, file))
