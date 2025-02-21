@@ -8,7 +8,7 @@ import requests
 from aiogram import types, Router, F
 from aiogram.types import FSInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
-
+from aiogram.utils.exceptions import FloodWait
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
@@ -80,48 +80,49 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
                 album_accumulator[key]["video"].append((file_name, media_type, tweet_dir))
         
         # التحقق من عدد الصور
-        if len(album_accumulator[key]["image"]) >= 5:
-            album_to_send = album_accumulator[key]["image"][:5]
-            media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
-            for file_path, media_type, _ in album_to_send:
-                media_group.add_photo(media=FSInputFile(file_path))
+        # مثال ضمن دالة reply_media لإرسال مجموعة الصور:
+if len(album_accumulator[key]["image"]) >= 5:
+    album_to_send = album_accumulator[key]["image"][:5]
+    media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
+    for file_path, media_type, _ in album_to_send:
+        media_group.add_photo(media=FSInputFile(file_path))
+    # محاولة إرسال المجموعة مع التقاط استثناء FloodWait
+    while True:
+        try:
             sent_messages = await message.answer_media_group(media_group.build())
-            # استخراج file_id وإعادة بناء الألبوم للقناة إذا لزم الأمر (يمكنك إلغاء التعليق عند الحاجة)
-            channel_media = []
-            for msg in sent_messages:
-                if msg.photo:
-                    file_id = msg.photo[-1].file_id
-                    channel_media.append(types.InputMediaPhoto(media=file_id))
-            # إزالة الصور المرسلة من القائمة
-            album_accumulator[key]["image"] = album_accumulator[key]["image"][5:]
-            # حذف الملفات المستخدمة
-            for file_path, _, dir_path in album_to_send:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                if os.path.exists(dir_path) and not os.listdir(dir_path):
-                    os.rmdir(dir_path)
-        
-        # التحقق من عدد الفيديوهات (وتشمل GIFs)
-       # التحقق من عدد الفيديوهات (وتشمل GIFs)
-        if len(album_accumulator[key]["video"]) >= 5:
-            album_to_send = album_accumulator[key]["video"][:5]
-            # استخدام كلمة "فيديو" كعنوان للألبوم
-            media_group = MediaGroupBuilder(caption="فيديو")
-            for file_path, media_type, _ in album_to_send:
-                media_group.add_video(media=FSInputFile(file_path))
-            sent_messages = await message.answer_media_group(media_group.build())
-            channel_media = []
-            for msg in sent_messages:
-                if msg.video:
-                    file_id = msg.video.file_id
-                    channel_media.append(types.InputMediaVideo(media=file_id))
-            album_accumulator[key]["video"] = album_accumulator[key]["video"][5:]
-            for file_path, _, dir_path in album_to_send:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                if os.path.exists(dir_path) and not os.listdir(dir_path):
-                    os.rmdir(dir_path)
+            break  # إذا تم الإرسال بنجاح، نخرج من الحلقة
+        except FloodWait as e:
+            print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
+            await asyncio.sleep(e.timeout)
+    # إزالة الصور المرسلة من القائمة
+    album_accumulator[key]["image"] = album_accumulator[key]["image"][5:]
+    # حذف الملفات المستخدمة من القرص
+    for file_path, _, dir_path in album_to_send:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if os.path.exists(dir_path) and not os.listdir(dir_path):
+            os.rmdir(dir_path)
 
+# مثال مشابه للفيديوهات:
+if len(album_accumulator[key]["video"]) >= 5:
+    album_to_send = album_accumulator[key]["video"][:5]
+    # استخدام "فيديو" كعنوان للألبوم
+    media_group = MediaGroupBuilder(caption="فيديو")
+    for file_path, media_type, _ in album_to_send:
+        media_group.add_video(media=FSInputFile(file_path))
+    while True:
+        try:
+            sent_messages = await message.answer_media_group(media_group.build())
+            break
+        except FloodWait as e:
+            print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
+            await asyncio.sleep(e.timeout)
+    album_accumulator[key]["video"] = album_accumulator[key]["video"][5:]
+    for file_path, _, dir_path in album_to_send:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if os.path.exists(dir_path) and not os.listdir(dir_path):
+            os.rmdir(dir_path)
 
     except Exception as e:
         print(e)
