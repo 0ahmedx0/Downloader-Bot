@@ -13,6 +13,7 @@ from aiogram.exceptions import TelegramRetryAfter as FloodWait
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
+from aiogram.types import ErrorEvent
 
 MAX_FILE_SIZE = 500 * 1024 * 1024
 
