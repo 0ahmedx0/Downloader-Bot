@@ -155,7 +155,7 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         remaining = total_media - processed
         logger.info("Processed chunk %d. Remaining media: %d", index + 1, remaining)
         # الانتظار لفترة ثابتة إضافية بين المجموعات لتفادي تجاوز الحدود
-        await asyncio.sleep(5)
+        await asyncio.sleep(30)
     
     # تفريغ قائمة الوسائط بعد الانتهاء
     context.user_data["media_queue"] = []
