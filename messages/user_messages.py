@@ -3,7 +3,7 @@ def cancel():
 
 
 def welcome_message():
-    return ("Welcome to MaxLoad Downloader! Send me a link to download the video.")
+    return ("هلو احمد ")
 
 
 def settings():
@@ -21,7 +21,7 @@ def captions(user_captions, post_caption, bot_url):
         return ('{post_caption}\n\n<a href="{bot_url}">حصريات </a>').format(post_caption=post_caption,
                                                                                         bot_url=bot_url)
     else:
-        return ('<a href="{bot_url}">💻Powered by MaxLoad</a>').format(bot_url=bot_url)
+        return ('<a href="{bot_url}">حصريات</a>').format(bot_url=bot_url)
 
 
 def join_group(chat_title):
