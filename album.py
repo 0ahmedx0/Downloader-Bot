@@ -18,7 +18,7 @@ from telegram.ext import (
 from telegram.error import RetryAfter  # استيراد الخطأ الخاص بالفيضانات
 
 # تعيين معرف القناة في متغيرات البيئة
-os.environ["CHANNEL_ID"] = "-1002486607044"
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 # إعداد التسجيل
 logging.basicConfig(
