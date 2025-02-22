@@ -14,10 +14,15 @@ from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
 
 MAX_FILE_SIZE = 500 * 1024 * 1024
+MAX_CONCURRENT_TWEETS = 3  # ✅ عدد التغريدات التي تُعالج في نفس الوقت
+PROCESSING_DELAY = 5  # ✅ تأخير بين كل تغريدة لمنع الفلود
 
 router = Router()
 album_accumulator_photos = {}
 album_accumulator_videos = {}
+
+tweet_queue = asyncio.Queue()  # ✅ قائمة انتظار للتغريدات
+
 
 def extract_tweet_ids(text):
     """استخراج معرفات التغريدات من النص."""
@@ -32,8 +37,22 @@ def extract_tweet_ids(text):
     tweet_ids = re.findall(r"(?:twitter|x)\.com/.{1,15}/(?:web|status(?:es)?)/([0-9]{1,20})", text + unshortened_links)
     return list(dict.fromkeys(tweet_ids)) if tweet_ids else None
 
+
+async def process_tweets():
+    """معالجة التغريدات تدريجيًا من قائمة الانتظار."""
+    while True:
+        message, tweet_id, bot_url, business_id = await tweet_queue.get()
+        try:
+            media = scrape_media(tweet_id)
+            await reply_media(message, tweet_id, media, bot_url, business_id)
+        except Exception as e:
+            print(f"❌ خطأ أثناء معالجة التغريدة {tweet_id}: {e}")
+
+        await asyncio.sleep(PROCESSING_DELAY)  # ✅ تأخير بين كل تغريدة لتقليل الفلود
+
+
 def scrape_media(tweet_id):
-    """استخراج الوسائط من التغريدة باستخدام API خارجي."""
+    """استخراج الوسائط من التغريدة."""
     r = requests.get(f'https://api.vxtwitter.com/Twitter/status/{tweet_id}')
     r.raise_for_status()
     try:
@@ -43,40 +62,9 @@ def scrape_media(tweet_id):
             raise Exception(f'API returned error: {html.unescape(match.group(1))}')
         raise
 
-async def download_media(media_url, file_path):
-    """تنزيل الوسائط من الإنترنت وحفظها محليًا."""
-    response = requests.get(media_url, stream=True)
-    response.raise_for_status()
-    with open(file_path, 'wb') as file:
-        for chunk in response.iter_content(chunk_size=8192):
-            file.write(chunk)
-
-async def send_album_safe(chat_id, album, album_type, user_captions, post_caption, bot_url):
-    """إرسال ألبوم مع التعامل مع مشكلة الحظر."""
-    media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
-    for file_path, media_type, _ in album:
-        if album_type == "photo":
-            media_group.add_photo(media=FSInputFile(file_path))
-        elif album_type == "video":
-            media_group.add_video(media=FSInputFile(file_path))
-
-    retry_attempts = 3  # عدد المحاولات عند الحظر
-    for attempt in range(retry_attempts):
-        try:
-            sent_messages = await bot.send_media_group(chat_id=chat_id, media=media_group.build())
-            return sent_messages
-        except Exception as e:
-            error_msg = str(e)
-            if "Too Many Requests" in error_msg:
-                retry_after = int(re.search(r"retry after (\d+)", error_msg).group(1))
-                print(f"📛 Flood control exceeded! Retrying after {retry_after} seconds...")
-                await asyncio.sleep(retry_after)
-            else:
-                print(f"❌ Error sending media group: {error_msg}")
-                break
 
 async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
-    """تجميع الصور والفيديوهات في ألبومات منفصلة وإرسالها بطريقة منظمة."""
+    """تنزيل الوسائط وإرسالها للمستخدم."""
     chat_id = message.chat.id
     tweet_dir = f"{OUTPUT_DIR}/{tweet_id}"
     post_caption = tweet_media["text"]
@@ -108,25 +96,26 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
         album_accumulator_photos[chat_id].extend(downloaded_photos)
         album_accumulator_videos[chat_id].extend(downloaded_videos)
 
-        async def send_if_ready(album_dict, album_type):
-            if len(album_dict[chat_id]) >= 5:  # ✅ إرسال كل 5 ملفات فقط في كل دفعة
-                await send_album_safe(chat_id, album_dict[chat_id][:5], album_type, user_captions, post_caption, bot_url)
-                album_dict[chat_id] = album_dict[chat_id][5:]  # الاحتفاظ بالملفات المتبقية
-                await asyncio.sleep(5)  # ✅ إضافة تأخير لتجنب الحظر
-
-        await send_if_ready(album_accumulator_photos, "photo")
-        await send_if_ready(album_accumulator_videos, "video")
-
     except Exception as e:
         print(e)
         if business_id is None:
             await message.react([types.ReactionTypeEmoji(emoji="👎")])
-        await message.reply("Something went wrong :(\nPlease try again later.")
+        await message.reply("حدث خطأ، الرجاء المحاولة لاحقًا.")
+
+
+async def download_media(media_url, file_path):
+    """تنزيل الوسائط وحفظها محليًا."""
+    response = requests.get(media_url, stream=True)
+    response.raise_for_status()
+    with open(file_path, 'wb') as file:
+        for chunk in response.iter_content(chunk_size=8192):
+            file.write(chunk)
+
 
 @router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
 @router.business_message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
 async def handle_tweet_links(message):
-    """التعامل مع روابط التغريدات وتنزيل الوسائط."""
+    """إضافة التغريدات إلى قائمة الانتظار ومعالجتها تدريجيًا."""
     business_id = message.business_connection_id
 
     if business_id is None:
@@ -140,15 +129,17 @@ async def handle_tweet_links(message):
             await bot.send_chat_action(message.chat.id, "typing")
 
         for tweet_id in tweet_ids:
-            media = scrape_media(tweet_id)
-            await reply_media(message, tweet_id, media, bot_url, business_id)
+            await tweet_queue.put((message, tweet_id, bot_url, business_id))  # ✅ إضافة التغريدة إلى قائمة الانتظار
 
-        await asyncio.sleep(2)  # ✅ تأخير بسيط قبل حذف الرسالة
-        try:
-            await message.delete()
-        except Exception as delete_error:
-            print(f"Error deleting message: {delete_error}")
+        # لا نحذف الرسائل مباشرة بل نتركها حتى تتم معالجتها بالكامل
+
     else:
         if business_id is None:
             await message.react([types.ReactionTypeEmoji(emoji="👎")])
-        await message.answer("No tweet IDs found.")
+        await message.answer("لم يتم العثور على معرفات تغريدات صالحة.")
+
+
+async def start_tweet_processor():
+    """تشغيل معالج التغريدات في الخلفية."""
+    for _ in range(MAX_CONCURRENT_TWEETS):  # ✅ معالجة 3 تغريدات فقط في نفس الوقت
+        asyncio.create_task(process_tweets())
