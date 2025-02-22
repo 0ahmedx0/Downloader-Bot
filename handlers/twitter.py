@@ -154,8 +154,8 @@ async def process_chat_queue(chat_id):
                 for tweet_id in tweet_ids:
                     media = scrape_media(tweet_id)
                     await reply_media(message, tweet_id, media, bot_url, business_id)
-                    await asyncio.sleep(3)  # تأخير 3 ثوانٍ بين معالجة كل تغريدة
-                await asyncio.sleep(2)
+                    await asyncio.sleep(2)  # تأخير 3 ثوانٍ بين معالجة كل تغريدة
+                await asyncio.sleep(1)
                 try:
                     await message.delete()
                 except Exception as delete_error:
