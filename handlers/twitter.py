@@ -14,18 +14,12 @@ from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
 
 MAX_FILE_SIZE = 500 * 1024 * 1024
-MAX_CONCURRENT_TWEETS = 3  # ✅ عدد التغريدات التي تُعالج في نفس الوقت
-PROCESSING_DELAY = 5  # ✅ تأخير بين كل تغريدة لمنع الفلود
 
 router = Router()
-album_accumulator_photos = {}
-album_accumulator_videos = {}
-
-tweet_queue = asyncio.Queue()  # ✅ قائمة انتظار للتغريدات
-
+album_accumulator = {"images": {}, "videos": {}}
 
 def extract_tweet_ids(text):
-    """استخراج معرفات التغريدات من النص."""
+    """استخراج معرفات التغريدات من النص"""
     unshortened_links = ''
     for link in re.findall(r't\.co\/[a-zA-Z0-9]+', text):
         try:
@@ -33,113 +27,82 @@ def extract_tweet_ids(text):
             unshortened_links += '\n' + unshortened_link
         except:
             pass
-
-    tweet_ids = re.findall(r"(?:twitter|x)\.com/.{1,15}/(?:web|status(?:es)?)/([0-9]{1,20})", text + unshortened_links)
-    return list(dict.fromkeys(tweet_ids)) if tweet_ids else None
-
-
-async def process_tweets():
-    """معالجة التغريدات تدريجيًا من قائمة الانتظار."""
-    while True:
-        message, tweet_id, bot_url, business_id = await tweet_queue.get()
-        try:
-            media = scrape_media(tweet_id)
-            await reply_media(message, tweet_id, media, bot_url, business_id)
-        except Exception as e:
-            print(f"❌ خطأ أثناء معالجة التغريدة {tweet_id}: {e}")
-
-        await asyncio.sleep(PROCESSING_DELAY)  # ✅ تأخير بين كل تغريدة لتقليل الفلود
-
+    return list(dict.fromkeys(re.findall(r"(?:twitter|x)\.com/.{1,15}/(?:web|status(?:es)?)/([0-9]{1,20})", text + unshortened_links)))
 
 def scrape_media(tweet_id):
-    """استخراج الوسائط من التغريدة."""
+    """استخراج الوسائط من التغريدة عبر API"""
     r = requests.get(f'https://api.vxtwitter.com/Twitter/status/{tweet_id}')
     r.raise_for_status()
-    try:
-        return r.json()
-    except requests.exceptions.JSONDecodeError:
-        if match := re.search(r'<meta content="(.*?)" property="og:description" />', r.text):
-            raise Exception(f'API returned error: {html.unescape(match.group(1))}')
-        raise
+    return r.json()
 
+def add_to_album(album_type, chat_id, file_path, media_type, tweet_dir):
+    """إضافة وسائط إلى الألبوم المناسب"""
+    if chat_id not in album_accumulator[album_type]:
+        album_accumulator[album_type][chat_id] = []
+    album_accumulator[album_type][chat_id].append((file_path, media_type, tweet_dir))
+
+async def send_album(album_type, chat_id, caption):
+    """إرسال ألبوم عند اكتماله"""
+    media_group = MediaGroupBuilder(caption=caption)
+    album_to_send = album_accumulator[album_type][chat_id][:10]
+    
+    for file_path, media_type, _ in album_to_send:
+        if media_type == 'image':
+            media_group.add_photo(media=FSInputFile(file_path))
+        elif media_type in ['video', 'gif']:
+            media_group.add_video(media=FSInputFile(file_path))
+    
+    sent_messages = await bot.send_media_group(chat_id=chat_id, media=media_group.build())
+    album_accumulator[album_type][chat_id] = album_accumulator[album_type][chat_id][10:]
+    
+    for file_path, _, dir_path in album_to_send:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        if os.path.exists(dir_path) and not os.listdir(dir_path):
+            os.rmdir(dir_path)
 
 async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
-    """تنزيل الوسائط وإرسالها للمستخدم."""
-    chat_id = message.chat.id
+    """إضافة الوسائط إلى الألبوم المناسب وإرساله عند اكتماله"""
+    await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name="twitter")
+    
     tweet_dir = f"{OUTPUT_DIR}/{tweet_id}"
-    post_caption = tweet_media["text"]
+    post_caption = "فيديو" if "video" in [m["type"] for m in tweet_media["media_extended"]] else "حصريات"
     user_captions = await db.get_user_captions(message.from_user.id)
-
+    
     if not os.path.exists(tweet_dir):
         os.makedirs(tweet_dir)
+    
+    for media in tweet_media['media_extended']:
+        media_url = media['url']
+        media_type = media['type']
+        file_name = os.path.join(tweet_dir, os.path.basename(urlsplit(media_url).path))
+        await download_media(media_url, file_name)
+        
+        if media_type in ['image', 'video', 'gif']:
+            album_type = "videos" if media_type in ['video', 'gif'] else "images"
+            add_to_album(album_type, message.chat.id, file_name, media_type, tweet_dir)
+    
+    if len(album_accumulator["videos"].get(message.chat.id, [])) >= 10:
+        await send_album("videos", message.chat.id, "فيديو")
+    if len(album_accumulator["images"].get(message.chat.id, [])) >= 10:
+        await send_album("images", message.chat.id, "حصريات")
 
-    downloaded_photos = []
-    downloaded_videos = []
-
-    try:
-        for media in tweet_media['media_extended']:
-            media_url = media['url']
-            media_type = media['type']
-            file_name = os.path.join(tweet_dir, os.path.basename(urlsplit(media_url).path))
-            await download_media(media_url, file_name)
-
-            if media_type == 'image':
-                downloaded_photos.append((file_name, media_type, tweet_dir))
-            elif media_type in ['video', 'gif']:
-                downloaded_videos.append((file_name, media_type, tweet_dir))
-
-        if chat_id not in album_accumulator_photos:
-            album_accumulator_photos[chat_id] = []
-        if chat_id not in album_accumulator_videos:
-            album_accumulator_videos[chat_id] = []
-
-        album_accumulator_photos[chat_id].extend(downloaded_photos)
-        album_accumulator_videos[chat_id].extend(downloaded_videos)
-
-    except Exception as e:
-        print(e)
-        if business_id is None:
-            await message.react([types.ReactionTypeEmoji(emoji="👎")])
-        await message.reply("حدث خطأ، الرجاء المحاولة لاحقًا.")
-
-
-async def download_media(media_url, file_path):
-    """تنزيل الوسائط وحفظها محليًا."""
-    response = requests.get(media_url, stream=True)
-    response.raise_for_status()
-    with open(file_path, 'wb') as file:
-        for chunk in response.iter_content(chunk_size=8192):
-            file.write(chunk)
-
-
-@router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
-@router.business_message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
+@router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)")
+@router.business_message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)")
 async def handle_tweet_links(message):
-    """إضافة التغريدات إلى قائمة الانتظار ومعالجتها تدريجيًا."""
-    business_id = message.business_connection_id
-
-    if business_id is None:
-        await message.react([types.ReactionTypeEmoji(emoji="👨‍💻")])
-
+    """معالجة روابط التغريدات وتنزيل الوسائط"""
     bot_url = f"t.me/{(await bot.get_me()).username}"
-
     tweet_ids = extract_tweet_ids(message.text)
+    
     if tweet_ids:
-        if business_id is None:
-            await bot.send_chat_action(message.chat.id, "typing")
-
+        await bot.send_chat_action(message.chat.id, "typing")
         for tweet_id in tweet_ids:
-            await tweet_queue.put((message, tweet_id, bot_url, business_id))  # ✅ إضافة التغريدة إلى قائمة الانتظار
-
-        # لا نحذف الرسائل مباشرة بل نتركها حتى تتم معالجتها بالكامل
-
+            media = scrape_media(tweet_id)
+            await reply_media(message, tweet_id, media, bot_url, None)
+        await asyncio.sleep(2)
+        try:
+            await message.delete()
+        except:
+            pass
     else:
-        if business_id is None:
-            await message.react([types.ReactionTypeEmoji(emoji="👎")])
-        await message.answer("لم يتم العثور على معرفات تغريدات صالحة.")
-
-
-async def start_tweet_processor():
-    """تشغيل معالج التغريدات في الخلفية."""
-    for _ in range(MAX_CONCURRENT_TWEETS):  # ✅ معالجة 3 تغريدات فقط في نفس الوقت
-        asyncio.create_task(process_tweets())
+        await message.answer("No tweet IDs found.")
