@@ -7,7 +7,7 @@ import requests
 from aiogram import types, Router, F
 from aiogram.types import FSInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
-from aiogram.exceptions import TelegramAPIError, FloodWait  # تحديث الاستيراد لـ aiogram 3.x
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter  # تحديث الاستيراد لـ aiogram 3.x
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
@@ -83,8 +83,8 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
                 try:
                     sent_messages = await message.answer_media_group(media_group.build())
                     break  # إذا تم الإرسال بنجاح، نخرج من الحلقة
-                except FloodWait as e:
-                    print(f"FloodWait: الانتظار لمدة {e.retry_after} ثانية قبل إعادة المحاولة")
+                except TelegramRetryAfter as e:
+                    print(f"TelegramRetryAfter: الانتظار لمدة {e.retry_after} ثانية قبل إعادة المحاولة")
                     await asyncio.sleep(e.retry_after)
             # إزالة الصور المرسلة من القائمة
             album_accumulator[key]["image"] = album_accumulator[key]["image"][5:]
@@ -108,8 +108,8 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
                 try:
                     sent_messages = await message.answer_media_group(media_group.build())
                     break
-                except FloodWait as e:
-                    print(f"FloodWait: الانتظار لمدة {e.retry_after} ثانية قبل إعادة المحاولة")
+                except TelegramRetryAfter as e:
+                    print(f"TelegramRetryAfter: الانتظار لمدة {e.retry_after} ثانية قبل إعادة المحاولة")
                     await asyncio.sleep(e.retry_after)
             album_accumulator[key]["video"] = album_accumulator[key]["video"][5:]
             for file_path, _, dir_path in album_to_send:
