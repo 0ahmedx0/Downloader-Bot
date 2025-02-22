@@ -103,7 +103,12 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
         # التحقق من عدد الفيديوهات
         if len(album_accumulator[key]["video"]) >= 5:
             album_to_send = album_accumulator[key]["video"][:5]
-            media_group = [InputMediaVideo(media=FSInputFile(file_path)) for file_path, _, _ in album_to_send]
+            media_group = []
+            for i, (file_path, _, _) in enumerate(album_to_send):
+                if i == 0:  # فقط للعنصر الأول، نضيف الوصف "فيديو"
+                    media_group.append(InputMediaVideo(media=FSInputFile(file_path), caption="فيديو"))
+                else:
+                    media_group.append(InputMediaVideo(media=FSInputFile(file_path)))
             
             for attempt in range(retry_attempts):
                 try:
