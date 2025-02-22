@@ -5,9 +5,8 @@ import re
 from urllib.parse import urlsplit
 import requests
 from aiogram import types, Router, F
-from aiogram.types import FSInputFile
-from aiogram.utils.media_group import MediaGroupBuilder
-from aiogram.utils.exceptions import FloodWait
+from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo
+from aiogram.exceptions import TelegramRetryAfter as FloodWait
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
@@ -80,17 +79,15 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
         # التحقق من عدد الصور
         if len(album_accumulator[key]["image"]) >= 5:
             album_to_send = album_accumulator[key]["image"][:5]
-            media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
-            for file_path, media_type, _ in album_to_send:
-                media_group.add_photo(media=FSInputFile(file_path))
+            media_group = [InputMediaPhoto(media=FSInputFile(file_path)) for file_path, _, _ in album_to_send]
             
             for attempt in range(retry_attempts):
                 try:
-                    sent_messages = await message.answer_media_group(media_group.build())
+                    await message.answer_media_group(media=media_group)
                     break  # إذا تم الإرسال بنجاح، نخرج من الحلقة
                 except FloodWait as e:
-                    print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
-                    await asyncio.sleep(e.timeout)
+                    print(f"FloodWait: الانتظار لمدة {e.retry_after} ثانية قبل إعادة المحاولة")
+                    await asyncio.sleep(e.retry_after)
                 except Exception as e:
                     print(f"خطأ أثناء الإرسال: {e}")
                     if attempt == retry_attempts - 1:
@@ -106,17 +103,15 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
         # التحقق من عدد الفيديوهات
         if len(album_accumulator[key]["video"]) >= 5:
             album_to_send = album_accumulator[key]["video"][:5]
-            media_group = MediaGroupBuilder(caption="فيديو")
-            for file_path, media_type, _ in album_to_send:
-                media_group.add_video(media=FSInputFile(file_path))
+            media_group = [InputMediaVideo(media=FSInputFile(file_path)) for file_path, _, _ in album_to_send]
             
             for attempt in range(retry_attempts):
                 try:
-                    sent_messages = await message.answer_media_group(media_group.build())
+                    await message.answer_media_group(media=media_group)
                     break  # إذا تم الإرسال بنجاح، نخرج من الحلقة
                 except FloodWait as e:
-                    print(f"FloodWait: الانتظار لمدة {e.timeout} ثانية قبل إعادة المحاولة")
-                    await asyncio.sleep(e.timeout)
+                    print(f"FloodWait: الانتظار لمدة {e.retry_after} ثانية قبل إعادة المحاولة")
+                    await asyncio.sleep(e.retry_after)
                 except Exception as e:
                     print(f"خطأ أثناء الإرسال: {e}")
                     if attempt == retry_attempts - 1:
@@ -150,7 +145,7 @@ async def process_chat_queue(chat_id):
             tweet_ids = extract_tweet_ids(message.text)
             if tweet_ids:
                 if business_id is None:
-                    await bot.send_chat_action(message.chat.id, "typing")
+                    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
                 for tweet_id in tweet_ids:
                     media = scrape_media(tweet_id)
                     await reply_media(message, tweet_id, media, bot_url, business_id)
