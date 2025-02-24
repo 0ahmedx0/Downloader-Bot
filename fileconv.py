@@ -239,26 +239,22 @@ def video(client, message):
 def start(client, message):
     app.send_message(message.chat.id, f"Welcome {message.from_user.mention}\nSend a **File** first and then you can choose **Extension**\n\n__Want to know more about me?\nUse /help - to get List of Commands\nUse /detail - to get List of Supported Extensions\n\nI also have Special AI features including ChatBot, you don't believe me? Ask me anything__", reply_to_message_id=message.id)
 
-# Start worker threads
-threads = []
-for _ in range(MAX_THREADS):
-    t = threading.Thread(target=process_messages, daemon=True)
-    t.start()
-    threads.append(t)
-
 # Function to process messages from the queue
 def process_messages():
     while True:
         try:
+            # Get a message from the queue
             message = message_queue.get()
             if message is None:
                 break
 
+            # Check if the message is a video
             if message.video:
                 handle_video(message)
             else:
                 app.send_message(message.chat.id, "This is not a video.", reply_to_message_id=message.id)
 
+            # Mark the task as done
             message_queue.task_done()
         except Exception as e:
             print(f"Error processing message: {e}")
@@ -268,6 +264,13 @@ def handle_video(message):
     oldm = app.send_message(message.chat.id, '__Sending in Stream Format__', reply_to_message_id=message.id)
     sv = threading.Thread(target=lambda: sendvideo(message, oldm), daemon=True)
     sv.start()
+
+# Start worker threads
+threads = []
+for _ in range(MAX_THREADS):
+    t = threading.Thread(target=process_messages, daemon=True)
+    t.start()
+    threads.append(t)
 
 # Run the bot
 app.run()
