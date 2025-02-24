@@ -1,142 +1,158 @@
-import pyrogram
-from pyrogram import Client, filters, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import os
-import subprocess
 import threading
+import queue
 import time
-import mediainfo
+from pyrogram import Client, filters
 
-
-# تهيئة البوت
+# env
 bot_token = os.environ.get("TOKEN", "")
 api_hash = os.environ.get("HASH", "")
 api_id = os.environ.get("ID", "")
+
+# bot
 app = Client("my_bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
-MESGS = {}
-task_queue = queue.Queue()  # قائمة انتظار المهام
-client_lock = threading.Lock()  # لقفل العمليات الحساسة
 
-# دالة المعالجة الرئيسية
-def sendvideo(message, oldmessage):
-    try:
-        file, msg = down(message)
-        thumb, duration, width, height = mediainfo.allinfo(file)
-        up(message, file, msg, video=True, capt=f'**{file.split("/")[-1]}**', 
-           thumb=thumb, duration=duration, height=height, width=width)
-        app.delete_messages(message.chat.id, message_ids=oldmessage.id)
-        os.remove(file)
-    except Exception as e:
-        with client_lock:
-            app.send_message(message.chat.id, f"حدث خطأ: {str(e)}")
-        if 'file' in locals() and os.path.exists(file):
-            os.remove(file)
+# Queue for processing messages
+message_queue = queue.Queue()
 
-# دالة المعالجة للخيوط
-def worker():
+# Maximum number of threads
+MAX_THREADS = 3
+
+# Function to process messages from the queue
+def process_messages():
     while True:
-        message = task_queue.get()
-        if message is None:
-            break
         try:
-            with client_lock:
-                oldmessage = app.send_message(
-                    message.chat.id,
-                    "جار المعالجة...",
-                    reply_to_message_id=message.id
-                )
-            sendvideo(message, oldmessage)
+            # Get a message from the queue
+            message = message_queue.get()
+            if message is None:
+                break
+
+            # Check if the message is a video
+            if message.video:
+                handle_video(message)
+            else:
+                app.send_message(message.chat.id, "This is not a video.", reply_to_message_id=message.id)
+
+            # Mark the task as done
+            message_queue.task_done()
         except Exception as e:
-            with client_lock:
-                app.send_message(message.chat.id, f"حدث خطأ: {str(e)}")
-        finally:
-            task_queue.task_done()
+            print(f"Error processing message: {e}")
 
-# عند استلام فيديو
-@app.on_message(filters.video)
-def handle_video(client, message):
-    # إضافة الفيديو مباشرة إلى قائمة الانتظار
-    task_queue.put(message)
-    app.send_message(
-        message.chat.id,
-        f"تمت إضافة الفيديو إلى قائمة الانتظار ({task_queue.qsize()} ملفات قيد المعالجة)",
-        reply_to_message_id=message.id
-    )
+# Function to handle video messages
+def handle_video(message):
+    # Save the message as a video
+    saveMsg(message, "VIDEO")
 
-# عند بدء البوت
-@app.on_message(filters.command(['start']))
-def start(client, message):
-    app.send_message(
-        message.chat.id,
-        f"مرحبا {message.from_user.mention}!\nأرسل أي فيديو لمعالجته تلقائياً",
-        reply_to_message_id=message.id
-    )
-    
-    # بدء 3 خيوط عمل
-    for _ in range(3):
-        threading.Thread(target=worker, daemon=True).start()
+    # Send a temporary message indicating that the video is being processed
+    oldm = app.send_message(message.chat.id, '__Sending in Stream Format__', reply_to_message_id=message.id)
 
-# دوال التنزيل والرفع (مأخوذة من الكود الأصلي مع إضافة locks)
+    # Start a thread to send the video
+    sv = threading.Thread(target=lambda: sendvideo(message, oldm), daemon=True)
+    sv.start()
+
+# Function to send video
+def sendvideo(message, oldmessage):
+    file, msg = down(message)
+    thumb, duration, width, height = mediainfo.allinfo(file)
+    up(message, file, msg, video=True, capt=f'**{file.split("/")[-1]}**', thumb=thumb, duration=duration, height=height, widht=width)
+    app.delete_messages(message.chat.id, message_ids=oldmessage.id)
+    os.remove(file)
+
+# Download function
 def down(message):
-    with client_lock:
+    try:
+        size = int(message.document.file_size)
+    except:
         try:
             size = int(message.video.file_size)
         except:
-            size = 0
+            size = 1
+    if size > 25000000:
+        msg = app.send_message(message.chat.id, '__Downloading__', reply_to_message_id=message.id)
+        dosta = threading.Thread(target=lambda: downstatus(f'{message.id}downstatus.txt', msg), daemon=True)
+        dosta.start()
+    else:
         msg = None
-        if size > 25_000_000:
-            msg = app.send_message(message.chat.id, '__Downloading__', reply_to_message_id=message.id)
-            threading.Thread(target=lambda: downstatus(f'{message.id}downstatus.txt', msg), daemon=True).start()
-        file = app.download_media(message, progress=dprogress, progress_args=[message])
-        if os.path.exists(f'{message.id}downstatus.txt'):
-            os.remove(f'{message.id}downstatus.txt')
-        return file, msg
+    file = app.download_media(message, progress=dprogress, progress_args=[message])
+    os.remove(f'{message.id}downstatus.txt')
+    return file, msg
 
-def up(message, file, msg, video=False, capt="", thumb=None, duration=0, width=0, height=0, multi=False):
-    with client_lock:
-        if msg and not multi:
-            try:
-                app.edit_message_text(message.chat.id, msg.id, '__Uploading__')
-            except:
-                pass
-        if os.path.getsize(file) > 25_000_000:
-            threading.Thread(target=lambda: upstatus(f'{message.id}upstatus.txt', msg), daemon=True).start()
-        if not video:
-            app.send_document(message.chat.id, document=file, caption=capt, force_document=True, reply_to_message_id=message.id, progress=uprogress, progress_args=[message])
-        else:
-            app.send_video(message.chat.id, video=file, caption=capt, thumb=thumb, duration=duration, width=width, height=height, reply_to_message_id=message.id, progress=uprogress, progress_args=[message])
-        if thumb and os.path.exists(thumb):
-            os.remove(thumb)
-        if os.path.exists(f'{message.id}upstatus.txt'):
-            os.remove(f'{message.id}upstatus.txt')
-        if msg and not multi:
-            app.delete_messages(message.chat.id, message_ids=msg.id)
+# Upload function
+def up(message, file, msg, video=False, capt="", thumb=None, duration=0, widht=0, height=0, multi=False):
+    if msg is not None:
+        try:
+            app.edit_message_text(message.chat.id, msg.id, '__Uploading__')
+        except:
+            pass
 
-# دوال الحالة (مأخوذة من الكود الأصلي)
-def dprogress(current, total, message):
-    with open(f'{message.id}downstatus.txt', "w") as f:
-        f.write(f"{current * 100 / total:.1f}%")
+    if os.path.getsize(file) > 25000000:
+        upsta = threading.Thread(target=lambda: upstatus(f'{message.id}upstatus.txt', msg), daemon=True)
+        upsta.start()
+    if not video:
+        app.send_document(message.chat.id, document=file, caption=capt, force_document=True, reply_to_message_id=message.id, progress=uprogress, progress_args=[message])
+    else:
+        app.send_video(message.chat.id, video=file, caption=capt, thumb=thumb, duration=duration, width=widht, height=height, reply_to_message_id=message.id, progress=uprogress, progress_args=[message])
+    if thumb is not None:
+        os.remove(thumb)
+    if os.path.exists(f'{message.id}upstatus.txt'):
+        os.remove(f'{message.id}upstatus.txt')
+    if msg is not None and not multi:
+        app.delete_messages(message.chat.id, message_ids=msg.id)
 
+# Progress functions
 def uprogress(current, total, message):
-    with open(f'{message.id}upstatus.txt', "w") as f:
-        f.write(f"{current * 100 / total:.1f}%")
+    with open(f'{message.id}upstatus.txt', "w") as fileup:
+        fileup.write(f"{current * 100 / total:.1f}%")
+
+def dprogress(current, total, message):
+    with open(f'{message.id}downstatus.txt', "w") as fileup:
+        fileup.write(f"{current * 100 / total:.1f}%")
+
+# Status functions
+def upstatus(statusfile, message):
+    while True:
+        if os.path.exists(statusfile):
+            break
+    time.sleep(5)
+    while os.path.exists(statusfile):
+        with open(statusfile, "r") as upread:
+            txt = upread.read()
+        try:
+            app.edit_message_text(message.chat.id, message.id, f"__Uploaded__ : **{txt}**")
+            time.sleep(10)
+        except:
+            time.sleep(5)
 
 def downstatus(statusfile, message):
+    while True:
+        if os.path.exists(statusfile):
+            break
+    time.sleep(5)
     while os.path.exists(statusfile):
-        with open(statusfile, "r") as f:
-            txt = f.read().strip()
-        with client_lock:
-            app.edit_message_text(message.chat.id, message.id, f"Downloading: {txt}")
-        time.sleep(5)
+        with open(statusfile, "r") as upread:
+            txt = upread.read()
+        try:
+            app.edit_message_text(message.chat.id, message.id, f"__Downloaded__ : **{txt}**")
+            time.sleep(10)
+        except:
+            time.sleep(5)
 
-def upstatus(statusfile, message):
-    while os.path.exists(statusfile):
-        with open(statusfile, "r") as f:
-            txt = f.read().strip()
-        with client_lock:
-            app.edit_message_text(message.chat.id, message.id, f"Uploading: {txt}")
-        time.sleep(5)
+# Message handlers
+@app.on_message(filters.video)
+def video(client, message):
+    # Add the message to the queue
+    message_queue.put(message)
 
-# تشغيل البوت
-if __name__ == "__main__":
-    app.run()
+@app.on_message(filters.command(['start']))
+def start(client, message):
+    app.send_message(message.chat.id, f"Welcome {message.from_user.mention}\nSend a **File** first and then you can choose **Extension**\n\n__Want to know more about me?\nUse /help - to get List of Commands\nUse /detail - to get List of Supported Extensions\n\nI also have Special AI features including ChatBot, you don't believe me? Ask me anything__", reply_to_message_id=message.id)
+
+# Start worker threads
+threads = []
+for _ in range(MAX_THREADS):
+    t = threading.Thread(target=process_messages, daemon=True)
+    t.start()
+    threads.append(t)
+
+# Run the bot
+app.run()
