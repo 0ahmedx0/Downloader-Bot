@@ -3,6 +3,7 @@ import threading
 import queue
 import time
 from pyrogram import Client, filters
+from pymediainfo import MediaInfo
 
 # env
 bot_token = os.environ.get("TOKEN", "")
@@ -18,58 +19,65 @@ message_queue = queue.Queue()
 # Maximum number of threads
 MAX_THREADS = 3
 
-# Dictionary to store saved messages
-MESGS = {}
+# Function to extract video metadata
+def mediainfo_allinfo(file_path):
+    media_info = MediaInfo.parse(file_path)
+    data = {
+        "thumb": None,
+        "duration": 0,
+        "width": 0,
+        "height": 0
+    }
 
-# Functions to manage saved messages
-def saveMsg(msg, msg_type):
-    MESGS[msg.from_user.id] = [msg, msg_type]
+    for track in media_info.tracks:
+        if track.track_type == "Video":
+            data["duration"] = int(float(track.duration)) if track.duration else 0
+            data["width"] = int(track.width) if track.width else 0
+            data["height"] = int(track.height) if track.height else 0
+            break
 
-def getSavedMsg(msg):
-    return MESGS.get(msg.from_user.id, [None, None])
-
-def removeSavedMsg(msg):
-    if msg.from_user.id in MESGS:
-        del MESGS[msg.from_user.id]
+    return data["thumb"], data["duration"], data["width"], data["height"]
 
 # Function to process messages from the queue
 def process_messages():
     while True:
         try:
-            # Get a message from the queue
             message = message_queue.get()
             if message is None:
                 break
 
-            # Check if the message is a video
             if message.video:
                 handle_video(message)
             else:
                 app.send_message(message.chat.id, "This is not a video.", reply_to_message_id=message.id)
 
-            # Mark the task as done
             message_queue.task_done()
         except Exception as e:
             print(f"Error processing message: {e}")
 
 # Function to handle video messages
 def handle_video(message):
-    # Save the message as a video
-    saveMsg(message, "VIDEO")
-
-    # Send a temporary message indicating that the video is being processed
     oldm = app.send_message(message.chat.id, '__Sending in Stream Format__', reply_to_message_id=message.id)
-
-    # Start a thread to send the video
     sv = threading.Thread(target=lambda: sendvideo(message, oldm), daemon=True)
     sv.start()
 
-# Rest of the code remains unchanged...
 # Function to send video
 def sendvideo(message, oldmessage):
     file, msg = down(message)
-    thumb, duration, width, height = mediainfo.allinfo(file)
-    up(message, file, msg, video=True, capt=f'**{file.split("/")[-1]}**', thumb=thumb, duration=duration, height=height, widht=width)
+    thumb, duration, width, height = mediainfo_allinfo(file)
+
+    up(
+        message=message,
+        file=file,
+        msg=msg,
+        video=True,
+        capt=f'**{file.split("/")[-1]}**',
+        thumb=thumb,
+        duration=duration,
+        widht=width,
+        height=height
+    )
+
     app.delete_messages(message.chat.id, message_ids=oldmessage.id)
     os.remove(file)
 
