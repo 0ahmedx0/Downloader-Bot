@@ -22,7 +22,7 @@ from moviepy.editor import VideoFileClip
 # إصلاح مشاكل الصوت وملفات النظام
 os.environ["XDG_RUNTIME_DIR"] = "/tmp"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
-os.environ["AUDIODEV"] = "null"
+os.environ["DISPLAY"] = ":0.0"  # إضافة DISPLAY لـ moviepy
 
 # تهيئة القناة
 raw_channel_id = os.getenv("CHANNEL_ID")
@@ -70,12 +70,12 @@ async def get_video_info(file_path):
         if not video_track or not general_track:
             return None
         
-        # إنشاء الصورة المصغرة
+        # إصلاح إنشاء الصورة المصغرة
         thumb_path = None
         try:
             with NamedTemporaryFile(suffix=".jpg", delete=False, dir=TEMP_DIR) as thumb_file:
                 clip = VideoFileClip(file_path)
-                clip.save_frame(thumb_file.name, t=0.5)  # استخدام الإطار عند 0.5 ثانية
+                clip.save_frame(thumb_file.name, t=1.0)  # تغيير التوقيت إلى 1.0 ثانية
                 thumb_path = thumb_file.name
         except Exception as e:
             logger.warning("Thumbnail creation failed: %s", e)
@@ -93,7 +93,7 @@ async def get_video_info(file_path):
 async def sendvideo(message):
     """معالجة الفيديو وإرجاع البيانات المطلوبة"""
     try:
-        # التحقق من حجم الملف
+        # التحقق من حجم الملف (الحد الأقصى 2GB)
         if message.video.file_size > 2 * 1024 * 1024 * 1024:
             await message.reply_text(MESSAGES["file_too_big"])
             return None
@@ -104,6 +104,11 @@ async def sendvideo(message):
         temp_path = os.path.join(TEMP_DIR, file_name)
         
         await file.download_to_drive(temp_path)
+        
+        # التحقق من وجود الملف بعد التنزيل
+        if not os.path.exists(temp_path):
+            logger.error("File not found after download: %s", temp_path)
+            return None
         
         # استخراج المعلومات
         video_info = await get_video_info(temp_path)
@@ -176,10 +181,11 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for item in chunk:
             if os.path.exists(item["media"]):
                 valid_files.append(item)
+                # إصلاح الخطأ الرئيسي: تغيير 'thumb' إلى 'thumbnail'
                 input_media.append(
                     InputMediaVideo(
                         media=open(item["media"], "rb"),
-                        thumb=open(item["thumb"], "rb") if item["thumb"] and os.path.exists(item["thumb"]) else None,
+                        thumbnail=open(item["thumb"], "rb") if item["thumb"] and os.path.exists(item["thumb"]) else None,
                         caption=item["caption"],
                         duration=item["duration"],
                         width=item["width"],
