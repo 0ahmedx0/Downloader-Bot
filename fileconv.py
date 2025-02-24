@@ -1,248 +1,150 @@
+import pyrogram
+from pyrogram import Client, filters, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import os
-import asyncio
-import logging
-from tempfile import NamedTemporaryFile
-from telegram import (
-    Update,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    InputMediaVideo,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-from telegram.error import TelegramError
-from pymediainfo import MediaInfo
-from moviepy.editor import VideoFileClip
+import shutil
+import subprocess
+import threading
+import queue
+import time
+from buttons import *
+import helperfunctions
+import mediainfo
+import guess
+import tormag
+import progconv
+import others
+import tictactoe
 
-# إصلاح مشاكل الصوت وملفات النظام
-os.environ["XDG_RUNTIME_DIR"] = "/tmp"
-os.environ["SDL_AUDIODRIVER"] = "dummy"
-os.environ["DISPLAY"] = ":0.0"  # إضافة DISPLAY لـ moviepy
+# تهيئة البوت
+bot_token = os.environ.get("TOKEN", "")
+api_hash = os.environ.get("HASH", "")
+api_id = os.environ.get("ID", "")
+app = Client("my_bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+MESGS = {}
+task_queue = queue.Queue()  # قائمة انتظار المهام
+client_lock = threading.Lock()  # لقفل العمليات الحساسة
 
-# تهيئة القناة
-raw_channel_id = os.getenv("CHANNEL_ID")
-CHANNEL_ID = raw_channel_id if raw_channel_id.startswith("@") else int(raw_channel_id) if raw_channel_id else None
+# دالة المعالجة الرئيسية
+def sendvideo(message, oldmessage):
+    try:
+        file, msg = down(message)
+        thumb, duration, width, height = mediainfo.allinfo(file)
+        up(message, file, msg, video=True, capt=f'**{file.split("/")[-1]}**', 
+           thumb=thumb, duration=duration, height=height, width=width)
+        app.delete_messages(message.chat.id, message_ids=oldmessage.id)
+        os.remove(file)
+    except Exception as e:
+        with client_lock:
+            app.send_message(message.chat.id, f"حدث خطأ: {str(e)}")
+        if 'file' in locals() and os.path.exists(file):
+            os.remove(file)
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# دالة المعالجة للخيوط
+def worker():
+    while True:
+        message = task_queue.get()
+        if message is None:
+            break
+        try:
+            with client_lock:
+                oldmessage = app.send_message(
+                    message.chat.id,
+                    "جار المعالجة...",
+                    reply_to_message_id=message.id
+                )
+            sendvideo(message, oldmessage)
+        except Exception as e:
+            with client_lock:
+                app.send_message(message.chat.id, f"حدث خطأ: {str(e)}")
+        finally:
+            task_queue.task_done()
 
-MESSAGES = {
-    "greeting": "Hello {username}! Send me videos up to 2GB to process and create albums.",
-    "help": "Forward/send videos, then click 'Create Album' to process and send them in groups of 10.",
-    "keyboard_done": "Create Album",
-    "keyboard_clear": "Reset Album",
-    "queue_cleared": "Queue cleared! Start fresh.",
-    "processing_started": "Processing {count} videos with 3 threads...",
-    "album_sent": "Album {index} sent successfully!",
-    "file_too_big": "⚠️ File too large! Maximum allowed size is 2GB.",
-}
-
-# إنشاء مجلد مؤقت خاص
-TEMP_DIR = "/tmp/telegram_bot"
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [
-        [KeyboardButton(MESSAGES["keyboard_done"])],
-        [KeyboardButton(MESSAGES["keyboard_clear"])]
-    ]
-    await update.message.reply_text(
-        MESSAGES["greeting"].format(username=update.effective_user.username),
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+# عند استلام فيديو
+@app.on_message(filters.video)
+def handle_video(client, message):
+    # إضافة الفيديو مباشرة إلى قائمة الانتظار
+    task_queue.put(message)
+    app.send_message(
+        message.chat.id,
+        f"تمت إضافة الفيديو إلى قائمة الانتظار ({task_queue.qsize()} ملفات قيد المعالجة)",
+        reply_to_message_id=message.id
     )
 
-async def get_video_info(file_path):
-    """استخراج معلومات الفيديو باستخدام pymediainfo"""
-    try:
-        media_info = MediaInfo.parse(file_path)
-        data = media_info.to_data()
-        
-        video_track = next((t for t in data['tracks'] if t['track_type'] == 'Video'), None)
-        general_track = next((t for t in data['tracks'] if t['track_type'] == 'General'), None)
-        
-        if not video_track or not general_track:
-            return None
-        
-        # إصلاح إنشاء الصورة المصغرة
-        thumb_path = None
-        try:
-            with NamedTemporaryFile(suffix=".jpg", delete=False, dir=TEMP_DIR) as thumb_file:
-                clip = VideoFileClip(file_path)
-                clip.save_frame(thumb_file.name, t=1.0)  # تغيير التوقيت إلى 1.0 ثانية
-                thumb_path = thumb_file.name
-        except Exception as e:
-            logger.warning("Thumbnail creation failed: %s", e)
-        
-        return {
-            "duration": int(general_track.get('duration', 0)) // 1000,
-            "width": int(video_track.get('width', 0)),
-            "height": int(video_track.get('height', 0)),
-            "thumb_path": thumb_path,
-        }
-    except Exception as e:
-        logger.error("MediaInfo error: %s", e)
-        return None
-
-async def sendvideo(message):
-    """معالجة الفيديو وإرجاع البيانات المطلوبة"""
-    try:
-        # التحقق من حجم الملف (الحد الأقصى 2GB)
-        if message.video.file_size > 2 * 1024 * 1024 * 1024:
-            await message.reply_text(MESSAGES["file_too_big"])
-            return None
-        
-        # تنزيل الفيديو إلى مجلد مؤقت
-        file = await message.video.get_file()
-        file_name = f"{message.video.file_unique_id}.mp4"
-        temp_path = os.path.join(TEMP_DIR, file_name)
-        
-        await file.download_to_drive(temp_path)
-        
-        # التحقق من وجود الملف بعد التنزيل
-        if not os.path.exists(temp_path):
-            logger.error("File not found after download: %s", temp_path)
-            return None
-        
-        # استخراج المعلومات
-        video_info = await get_video_info(temp_path)
-        if not video_info:
-            os.remove(temp_path)
-            return None
-        
-        return {
-            "type": "video",
-            "media": temp_path,
-            "thumb": video_info["thumb_path"],
-            "duration": video_info["duration"],
-            "width": video_info["width"],
-            "height": video_info["height"],
-            "caption": f"Processed: {os.path.basename(temp_path)}"
-        }
-    except TelegramError as e:
-        logger.error("Telegram error: %s", e)
-        return None
-    except Exception as e:
-        logger.error("Video processing failed: %s", e)
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        return None
-
-async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if "media_queue" not in context.user_data:
-        context.user_data["media_queue"] = []
-    context.user_data["media_queue"].append(update.message)
-    logger.info("Added media to queue: %s", update.message.message_id)
-
-async def process_media_task(sem, message, processed_media):
-    async with sem:
-        try:
-            media_info = await sendvideo(message)
-            if media_info:
-                processed_media.append(media_info)
-        except Exception as e:
-            logger.error("Error processing media: %s", e)
-
-async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    queue = context.user_data.get("media_queue", [])
-    if len(queue) < 2:
-        await update.message.reply_text("Need at least 2 videos!")
-        return
-
-    await update.message.reply_text(MESSAGES["processing_started"].format(count=len(queue)))
-
-    sem = asyncio.Semaphore(3)
-    processed_media = []
-    tasks = []
+# عند بدء البوت
+@app.on_message(filters.command(['start']))
+def start(client, message):
+    app.send_message(
+        message.chat.id,
+        f"مرحبا {message.from_user.mention}!\nأرسل أي فيديو لمعالجته تلقائياً",
+        reply_to_message_id=message.id
+    )
     
-    for msg in queue:
-        task = asyncio.create_task(process_media_task(sem, msg, processed_media))
-        task.add_done_callback(lambda t: logger.info("Task completed"))
-        tasks.append(task)
-    
-    await asyncio.gather(*tasks, return_exceptions=True)
-    processed_media = [m for m in processed_media if m is not None]
+    # بدء 3 خيوط عمل
+    for _ in range(3):
+        threading.Thread(target=worker, daemon=True).start()
 
-    if not processed_media:
-        await update.message.reply_text("⚠️ No videos were processed successfully!")
-        return
-
-    chunks = [processed_media[i:i+10] for i in range(0, len(processed_media), 10)]
-
-    for i, chunk in enumerate(chunks, 1):
-        input_media = []
-        valid_files = []
-        for item in chunk:
-            if os.path.exists(item["media"]):
-                valid_files.append(item)
-                # إصلاح الخطأ الرئيسي: تغيير 'thumb' إلى 'thumbnail'
-                input_media.append(
-                    InputMediaVideo(
-                        media=open(item["media"], "rb"),
-                        thumbnail=open(item["thumb"], "rb") if item["thumb"] and os.path.exists(item["thumb"]) else None,
-                        caption=item["caption"],
-                        duration=item["duration"],
-                        width=item["width"],
-                        height=item["height"]
-                    )
-                )
-            else:
-                logger.error("File not found: %s", item["media"])
-        
-        if not input_media:
-            await update.message.reply_text(f"⚠️ Album {i} is empty due to processing errors")
-            continue
-        
+# دوال التنزيل والرفع (مأخوذة من الكود الأصلي مع إضافة locks)
+def down(message):
+    with client_lock:
         try:
-            await context.bot.send_media_group(chat_id=CHANNEL_ID, media=input_media)
-            await update.message.reply_text(MESSAGES["album_sent"].format(index=i))
-        except Exception as e:
-            logger.error("Album send error: %s", e)
-            await update.message.reply_text(f"⚠️ Error sending album {i}: {str(e)}")
-        
-        # حذف الملفات بعد الإرسال
-        for item in valid_files:
+            size = int(message.video.file_size)
+        except:
+            size = 0
+        msg = None
+        if size > 25_000_000:
+            msg = app.send_message(message.chat.id, '__Downloading__', reply_to_message_id=message.id)
+            threading.Thread(target=lambda: downstatus(f'{message.id}downstatus.txt', msg), daemon=True).start()
+        file = app.download_media(message, progress=dprogress, progress_args=[message])
+        if os.path.exists(f'{message.id}downstatus.txt'):
+            os.remove(f'{message.id}downstatus.txt')
+        return file, msg
+
+def up(message, file, msg, video=False, capt="", thumb=None, duration=0, width=0, height=0, multi=False):
+    with client_lock:
+        if msg and not multi:
             try:
-                if os.path.exists(item["media"]):
-                    os.remove(item["media"])
-                if item["thumb"] and os.path.exists(item["thumb"]):
-                    os.remove(item["thumb"])
-            except Exception as e:
-                logger.error("Cleanup error: %s", e)
-        
-        await asyncio.sleep(10)
+                app.edit_message_text(message.chat.id, msg.id, '__Uploading__')
+            except:
+                pass
+        if os.path.getsize(file) > 25_000_000:
+            threading.Thread(target=lambda: upstatus(f'{message.id}upstatus.txt', msg), daemon=True).start()
+        if not video:
+            app.send_document(message.chat.id, document=file, caption=capt, force_document=True, reply_to_message_id=message.id, progress=uprogress, progress_args=[message])
+        else:
+            app.send_video(message.chat.id, video=file, caption=capt, thumb=thumb, duration=duration, width=width, height=height, reply_to_message_id=message.id, progress=uprogress, progress_args=[message])
+        if thumb and os.path.exists(thumb):
+            os.remove(thumb)
+        if os.path.exists(f'{message.id}upstatus.txt'):
+            os.remove(f'{message.id}upstatus.txt')
+        if msg and not multi:
+            app.delete_messages(message.chat.id, message_ids=msg.id)
 
-    context.user_data["media_queue"] = []
-    await update.message.reply_text("All albums processed successfully!")
+# دوال الحالة (مأخوذة من الكود الأصلي)
+def dprogress(current, total, message):
+    with open(f'{message.id}downstatus.txt', "w") as f:
+        f.write(f"{current * 100 / total:.1f}%")
 
-async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data["media_queue"] = []
-    await update.message.reply_text(MESSAGES["queue_cleared"])
+def uprogress(current, total, message):
+    with open(f'{message.id}upstatus.txt', "w") as f:
+        f.write(f"{current * 100 / total:.1f}%")
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Exception while handling an update:", exc_info=context.error)
+def downstatus(statusfile, message):
+    while os.path.exists(statusfile):
+        with open(statusfile, "r") as f:
+            txt = f.read().strip()
+        with client_lock:
+            app.edit_message_text(message.chat.id, message.id, f"Downloading: {txt}")
+        time.sleep(5)
 
-def main() -> None:
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        logger.error("BOT_TOKEN not set")
-        return
+def upstatus(statusfile, message):
+    while os.path.exists(statusfile):
+        with open(statusfile, "r") as f:
+            txt = f.read().strip()
+        with client_lock:
+            app.edit_message_text(message.chat.id, message.id, f"Uploading: {txt}")
+        time.sleep(5)
 
-    application = Application.builder().token(token).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.VIDEO, add_media))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_done']}$"), create_album))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$"), reset_album))
-    application.add_error_handler(error_handler)
-
-    application.run_polling()
-
+# تشغيل البوت
 if __name__ == "__main__":
-    main()
+    app.run()
