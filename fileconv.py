@@ -2,18 +2,11 @@ import pyrogram
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import os
-import shutil
 import subprocess
 import threading
-import queue
 import time
-import helperfunctions
 import mediainfo
-import guess
-import tormag
-import progconv
-import others
-import tictactoe
+
 
 # تهيئة البوت
 bot_token = os.environ.get("TOKEN", "")
