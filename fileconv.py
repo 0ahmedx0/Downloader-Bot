@@ -18,6 +18,20 @@ message_queue = queue.Queue()
 # Maximum number of threads
 MAX_THREADS = 3
 
+# Dictionary to store saved messages
+MESGS = {}
+
+# Functions to manage saved messages
+def saveMsg(msg, msg_type):
+    MESGS[msg.from_user.id] = [msg, msg_type]
+
+def getSavedMsg(msg):
+    return MESGS.get(msg.from_user.id, [None, None])
+
+def removeSavedMsg(msg):
+    if msg.from_user.id in MESGS:
+        del MESGS[msg.from_user.id]
+
 # Function to process messages from the queue
 def process_messages():
     while True:
@@ -50,6 +64,7 @@ def handle_video(message):
     sv = threading.Thread(target=lambda: sendvideo(message, oldm), daemon=True)
     sv.start()
 
+# Rest of the code remains unchanged...
 # Function to send video
 def sendvideo(message, oldmessage):
     file, msg = down(message)
