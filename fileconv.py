@@ -7,7 +7,6 @@ import subprocess
 import threading
 import queue
 import time
-from buttons import *
 import helperfunctions
 import mediainfo
 import guess
