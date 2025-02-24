@@ -18,10 +18,9 @@ from telegram.ext import (
 from telegram.error import TelegramError
 from pymediainfo import MediaInfo
 from moviepy.editor import VideoFileClip
-import shutil
 
-# إصلاح مشكلة ALSA
-os.environ["XDG_RUNTIME_DIR"] = "/tmp/runtime-bot"
+# إصلاح مشاكل الصوت وملفات النظام
+os.environ["XDG_RUNTIME_DIR"] = "/tmp"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
 os.environ["AUDIODEV"] = "null"
 
@@ -45,52 +44,64 @@ MESSAGES = {
     "file_too_big": "⚠️ File too large! Maximum allowed size is 2GB.",
 }
 
+# إنشاء مجلد مؤقت خاص
+TEMP_DIR = "/tmp/telegram_bot"
+os.makedirs(TEMP_DIR, exist_ok=True)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = [
+        [KeyboardButton(MESSAGES["keyboard_done"])],
+        [KeyboardButton(MESSAGES["keyboard_clear"])]
+    ]
+    await update.message.reply_text(
+        MESSAGES["greeting"].format(username=update.effective_user.username),
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+
 async def get_video_info(file_path):
     """استخراج معلومات الفيديو باستخدام pymediainfo"""
     try:
         media_info = MediaInfo.parse(file_path)
         data = media_info.to_data()
         
-        video_track = next((track for track in data['tracks'] if track['track_type'] == 'Video'), None)
-        general_track = next((track for track in data['tracks'] if track['track_type'] == 'General'), None)
+        video_track = next((t for t in data['tracks'] if t['track_type'] == 'Video'), None)
+        general_track = next((t for t in data['tracks'] if t['track_type'] == 'General'), None)
         
-        duration = int(general_track['duration']) // 1000  # تحويل إلى ثواني
-        width = int(video_track['width'])
-        height = int(video_track['height'])
+        if not video_track or not general_track:
+            return None
         
-        # إنشاء الصورة المصغرة باستخدام moviepy مع إصلاح مشاكل الصوت
-        with NamedTemporaryFile(suffix=".jpg", delete=False) as thumb_file:
-            try:
+        # إنشاء الصورة المصغرة
+        thumb_path = None
+        try:
+            with NamedTemporaryFile(suffix=".jpg", delete=False, dir=TEMP_DIR) as thumb_file:
                 clip = VideoFileClip(file_path)
-                clip.save_frame(thumb_file.name, t=1)
-            except Exception as e:
-                logger.warning("Failed to extract thumbnail: %s", e)
-                thumb_file = None
-            thumb_path = thumb_file.name if thumb_file else None
+                clip.save_frame(thumb_file.name, t=0.5)  # استخدام الإطار عند 0.5 ثانية
+                thumb_path = thumb_file.name
+        except Exception as e:
+            logger.warning("Thumbnail creation failed: %s", e)
         
         return {
-            "duration": duration,
-            "width": width,
-            "height": height,
+            "duration": int(general_track.get('duration', 0)) // 1000,
+            "width": int(video_track.get('width', 0)),
+            "height": int(video_track.get('height', 0)),
             "thumb_path": thumb_path,
         }
     except Exception as e:
-        logger.error("Error processing video info: %s", e)
+        logger.error("MediaInfo error: %s", e)
         return None
 
 async def sendvideo(message):
     """معالجة الفيديو وإرجاع البيانات المطلوبة"""
     try:
-        # التحقق من حجم الملف (الحد الأقصى 2GB)
+        # التحقق من حجم الملف
         if message.video.file_size > 2 * 1024 * 1024 * 1024:
             await message.reply_text(MESSAGES["file_too_big"])
             return None
         
-        # تنزيل الفيديو مع تدفق البيانات
+        # تنزيل الفيديو إلى مجلد مؤقت
         file = await message.video.get_file()
-        temp_dir = "/tmp/telegram_bot"
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_path = os.path.join(temp_dir, f"{message.video.file_unique_id}.mp4")
+        file_name = f"{message.video.file_unique_id}.mp4"
+        temp_path = os.path.join(TEMP_DIR, file_name)
         
         await file.download_to_drive(temp_path)
         
@@ -117,6 +128,21 @@ async def sendvideo(message):
         if os.path.exists(temp_path):
             os.remove(temp_path)
         return None
+
+async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if "media_queue" not in context.user_data:
+        context.user_data["media_queue"] = []
+    context.user_data["media_queue"].append(update.message)
+    logger.info("Added media to queue: %s", update.message.message_id)
+
+async def process_media_task(sem, message, processed_media):
+    async with sem:
+        try:
+            media_info = await sendvideo(message)
+            if media_info:
+                processed_media.append(media_info)
+        except Exception as e:
+            logger.error("Error processing media: %s", e)
 
 async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     queue = context.user_data.get("media_queue", [])
@@ -189,10 +215,12 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.user_data["media_queue"] = []
     await update.message.reply_text("All albums processed successfully!")
 
-# باقي الدوال (start, add_media, reset_album, process_media_task, main) تبقى كما هي
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["media_queue"] = []
     await update.message.reply_text(MESSAGES["queue_cleared"])
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Exception while handling an update:", exc_info=context.error)
 
 def main() -> None:
     token = os.getenv("BOT_TOKEN")
@@ -206,6 +234,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.VIDEO, add_media))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_done']}$"), create_album))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$"), reset_album))
+    application.add_error_handler(error_handler)
 
     application.run_polling()
 
