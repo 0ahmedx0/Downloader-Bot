@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 import tempfile
-import time
 from collections import defaultdict
 from pyrogram import Client, filters, enums
 from moviepy.editor import VideoFileClip
@@ -102,22 +101,21 @@ async def process_video(chat_id, message):
         # إنشاء الصورة المصغرة
         thumb = await handle_errors(generate_thumbnail, temp_file)
         
-        # بدء مهمة تحديث التقدم
-        progress_task = asyncio.create_task(update_progress(chat_id))
-        try:
-            await handle_errors(
-                app.send_video,
-                chat_id=chat_id,
-                video=temp_file,
-                duration=metadata['duration'],
-                width=metadata['width'],
-                height=metadata['height'],
-                thumb=thumb,
-                caption=f"✅ {os.path.basename(temp_file)}",
-                reply_to_message_id=message.id
-            )
-        finally:
-            progress_task.cancel()
+        # تأخير 5 ثوانٍ قبل بدء عملية رفع الفيديو
+        await asyncio.sleep(2)
+        
+        # رفع الفيديو المعالج
+        await handle_errors(
+            app.send_video,
+            chat_id=chat_id,
+            video=temp_file,
+            duration=metadata['duration'],
+            width=metadata['width'],
+            height=metadata['height'],
+            thumb=thumb,
+            caption=f"✅ {os.path.basename(temp_file)}",
+            reply_to_message_id=message.id
+        )
         
     finally:
         # التنظيف: حذف الملفات المؤقتة
@@ -143,28 +141,13 @@ async def process_queue(chat_id):
             message = await cq.queue.get()
             await process_video(chat_id, message)
             cq.queue.task_done()
+            # تأخير 3 ثوانٍ قبل بدء تنزيل الملف التالي
+            await asyncio.sleep(5)
     except Exception as e:
         logging.error(f"فشل معالجة الطابور: {str(e)}")
         await app.send_message(chat_id, f"⚠️ حدث خطأ جسيم: {str(e)}")
     finally:
         cq.active = False
-
-async def update_progress(chat_id):
-    """تحديث التقدم كل 5 ثواني"""
-    progress_msg = await app.send_message(chat_id, "⏳ جاري التحضير...")
-    last_update = 0
-    try:
-        while True:
-            if time.time() - last_update > 5:
-                await progress_msg.edit_text(
-                    f"📊 الحالة:\n"
-                    f"• المهام المتبقية: {chat_queues[chat_id].queue.qsize()}\n"
-                    f"• المحاولات المتبقية: {chat_queues[chat_id].retry_count}"
-                )
-                last_update = time.time()
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        pass
 
 # ---------- معالجة الأحداث ---------- #
 @app.on_message(filters.video | filters.document)
@@ -188,8 +171,9 @@ async def start(client, message):
         "المميزات:\n"
         "• معالجة غير محدودة للفيديوهات\n"
         "• نظام طابور ذكي لكل دردشة\n"
-        "• تحديثات حالة كل 5 ثواني\n"
-        "• إعادة محاولة تلقائية عند الأخطاء"
+        "• إعادة محاولة تلقائية عند الأخطاء\n"
+        "• تأخير 5 ثوانٍ قبل رفع الفيديو\n"
+        "• تأخير 3 ثوانٍ بين كل ملف (بعد رفع الملف الحالي)"
     )
     await message.reply(text)
 
