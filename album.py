@@ -121,73 +121,72 @@ async def send_media_group_with_backoff(update: Update, context: ContextTypes.DE
     return False
 
 async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # جلب قائمة الوسائط من بيانات المستخدم
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
-    
+
+    # التأكد من وجود عدد كافٍ من الوسائط لإنشاء ألبوم
     if total_media < 2:
         print("Not enough media items to create an album.")
         return
-    
+
     logger.info("Starting album conversion. Total media stored: %d", total_media)
-    
-    # تقسيم الوسائط إلى مجموعات بحد أقصى 10 عناصر لكل مجموعة
+
+    # تقسيم الوسائط إلى مجموعات لا تزيد عن 10 عناصر لكل مجموعة
     chunks = [media_queue[i: i + 10] for i in range(0, total_media, 10)]
     total_albums = len(chunks)
     processed_albums = 0
-    
-    channel_id = context.bot_data.get("CHANNEL_ID")
-    if not channel_id:
+
+    # استخدام المتغير العالمي CHANNEL_ID مباشرةً
+    global CHANNEL_ID
+    if not CHANNEL_ID:
         print("No channel has been set yet. Use /setchannel in your channel.")
         return
-    
-    # فترة التأخير بين الألبومات (بالثواني)
-    delay_between_albums = 30  # يمكنك تعديل هذه القيمة حسب الحاجة
-    
-    # إشعار المستخدم بالبداية
-    print(f"Starting to send {total_albums} albums. Please wait...")
-    
+
+    delay_between_albums = 30  # فترة التأخير بين إرسال كل ألبوم (بالثواني)
+
+    # إرسال كل مجموعة كألبوم
     for index, chunk in enumerate(chunks):
         input_media = []
         for i, item in enumerate(chunk):
             if i == 0:
-                # تطبيق التسمية على العنصر الأول
+                # إضافة التسمية للعنصر الأول في المجموعة
                 if item["type"] == "photo":
-                    input_media.append(InputMediaPhoto(media=item["media"], caption=MESSAGES["album_caption"]))
+                    input_media.append(
+                        InputMediaPhoto(media=item["media"], caption=MESSAGES["album_caption"])
+                    )
                 elif item["type"] == "video":
-                    input_media.append(InputMediaVideo(media=item["media"], caption=MESSAGES["album_caption"]))
+                    input_media.append(
+                        InputMediaVideo(media=item["media"], caption=MESSAGES["album_caption"])
+                    )
             else:
                 if item["type"] == "photo":
                     input_media.append(InputMediaPhoto(media=item["media"]))
                 elif item["type"] == "video":
                     input_media.append(InputMediaVideo(media=item["media"]))
-        
-        # محاولة إرسال المجموعة
-        success = await send_media_group_with_backoff(update, context, input_media, channel_id, index)
+
+        # محاولة إرسال مجموعة الوسائط مع اعادة المحاولة عند حدوث أخطاء الفيضانات
+        success = await send_media_group_with_backoff(update, context, input_media, CHANNEL_ID, index)
         if not success:
             logger.error("Failed to send album chunk %d after retries.", index + 1)
-            # يمكنك إضافة منطق إضافي لمعالجة الفشل هنا إذا دعت الحاجة
-        
-        # تحديث التقدم
+
         processed_albums += 1
         remaining_albums = total_albums - processed_albums
         estimated_time_remaining = remaining_albums * delay_between_albums
-        
-        # تحويل الوقت المتبقي إلى دقائق وثواني
         minutes, seconds = divmod(estimated_time_remaining, 60)
         time_remaining_str = f"{minutes} minutes and {seconds} seconds"
-        
-        # طباعة التقدم والوقت المتبقي في سطر الأوامر
+
         progress_message = (
             f"Progress: {processed_albums}/{total_albums} albums sent.\n"
             f"Estimated time remaining: {time_remaining_str}."
         )
         print(progress_message)
         logger.info(progress_message)
-        
-        # الانتظار لفترة ثابتة بين المجموعات لتفادي تجاوز الحدود
+
+        # الانتظار لفترة محددة قبل إرسال الألبوم التالي لتفادي تجاوز الحدود
         await asyncio.sleep(delay_between_albums)
-    
-    # تفريغ قائمة الوسائط بعد الانتهاء
+
+    # تفريغ قائمة الوسائط بعد الانتهاء من إرسال الألبومات
     context.user_data["media_queue"] = []
     print("All albums have been sent successfully!")
 
