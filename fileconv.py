@@ -70,12 +70,14 @@ async def process_video(chat_id, message):
     thumb = None
 
     try:
-        # تنزيل الملف مع إعادة المحاولة
+        # بدء عملية التنزيل
+        logging.info(f"بدء تنزيل الملف لرسالة {message.id} ...")
         temp_file = await handle_errors(
             app.download_media,
             message,
             file_name=os.path.join(TEMP_DIR.name, f"temp_{message.id}.mp4")
         )
+        logging.info(f"تم تنزيل الملف بنجاح: {temp_file}")
         
         # محاولة إصلاح الفيديو بإعادة تغليفه باستخدام ffmpeg
         fixed_file = os.path.join(TEMP_DIR.name, f"fixed_{message.id}.mp4")
@@ -104,10 +106,12 @@ async def process_video(chat_id, message):
         # إنشاء الصورة المصغرة
         thumb = await handle_errors(generate_thumbnail, temp_file)
         
-        # تأخير 5 ثوانٍ قبل بدء عملية رفع الفيديو
+        # تأخير 5 ثوانٍ قبل بدء عملية الرفع
+        logging.info("انتظار 5 ثوانٍ قبل بدء رفع الملف ...")
         await asyncio.sleep(5)
         
-        # رفع الفيديو المعالج
+        # بدء عملية الرفع
+        logging.info("بدء رفع الملف ...")
         await handle_errors(
             app.send_video,
             chat_id=chat_id,
@@ -119,10 +123,12 @@ async def process_video(chat_id, message):
             caption=f"✅ {os.path.basename(temp_file)}",
             reply_to_message_id=message.id
         )
+        logging.info("تم رفع الملف بنجاح.")
         
         # حذف رسالة المستخدم بعد رفع الفيديو بنجاح
         try:
             await app.delete_messages(chat_id, message.id)
+            logging.info(f"تم حذف رسالة المستخدم {message.id}.")
         except Exception as del_exc:
             logging.error(f"فشل حذف رسالة المستخدم: {del_exc}")
         
@@ -131,6 +137,7 @@ async def process_video(chat_id, message):
         if confirmation_msg_id:
             try:
                 await app.delete_messages(chat_id, confirmation_msg_id)
+                logging.info(f"تم حذف رسالة التأكيد {confirmation_msg_id}.")
             except Exception as del_exc:
                 logging.error(f"فشل حذف رسالة التأكيد: {del_exc}")
         
@@ -193,7 +200,8 @@ async def start(client, message):
         "• إعادة محاولة تلقائية عند الأخطاء\n"
         "• تأخير 5 ثوانٍ قبل رفع الفيديو\n"
         "• تأخير 3 ثوانٍ بين كل ملف (بعد رفع الملف الحالي)\n"
-        "• حذف رسالة المستخدم ورسالة التأكيد بعد المعالجة والرفع الناجح"
+        "• حذف رسالة المستخدم ورسالة التأكيد بعد المعالجة والرفع الناجح\n"
+        "• طباعة حالة التنزيل والرفع في سطر الأوامر"
     )
     await message.reply(text)
 
