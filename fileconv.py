@@ -36,6 +36,9 @@ class ChatQueue:
 chat_queues = defaultdict(ChatQueue)
 TEMP_DIR = tempfile.TemporaryDirectory()  # مجلد مؤقت يتم تنظيفه تلقائيًا
 
+# قاموس لتخزين رسالة التأكيد الخاصة بكل رسالة واردة
+confirmation_messages = {}
+
 # ---------- وظائف أساسية ---------- #
 async def handle_errors(func, *args, **kwargs):
     """معالجة الأخطاء مع إعادة المحاولة"""
@@ -62,7 +65,7 @@ async def generate_thumbnail(video_path):
     return output_path if os.path.exists(output_path) else None
 
 async def process_video(chat_id, message):
-    """معالجة فيديو واحد بشكل كامل"""
+    """معالجة فيديو واحد بشكل كامل وحذف رسالة المستخدم ورسالة التأكيد بعد الرفع الناجح"""
     temp_file = None
     thumb = None
 
@@ -102,7 +105,7 @@ async def process_video(chat_id, message):
         thumb = await handle_errors(generate_thumbnail, temp_file)
         
         # تأخير 5 ثوانٍ قبل بدء عملية رفع الفيديو
-        await asyncio.sleep(2)
+        await asyncio.sleep(5)
         
         # رفع الفيديو المعالج
         await handle_errors(
@@ -116,6 +119,20 @@ async def process_video(chat_id, message):
             caption=f"✅ {os.path.basename(temp_file)}",
             reply_to_message_id=message.id
         )
+        
+        # حذف رسالة المستخدم بعد رفع الفيديو بنجاح
+        try:
+            await app.delete_messages(chat_id, message.message_id)
+        except Exception as del_exc:
+            logging.error(f"فشل حذف رسالة المستخدم: {del_exc}")
+        
+        # حذف رسالة التأكيد المرسلة من البوت
+        confirmation_msg_id = confirmation_messages.pop(message.message_id, None)
+        if confirmation_msg_id:
+            try:
+                await app.delete_messages(chat_id, confirmation_msg_id)
+            except Exception as del_exc:
+                logging.error(f"فشل حذف رسالة التأكيد: {del_exc}")
         
     finally:
         # التنظيف: حذف الملفات المؤقتة
@@ -142,7 +159,7 @@ async def process_queue(chat_id):
             await process_video(chat_id, message)
             cq.queue.task_done()
             # تأخير 3 ثوانٍ قبل بدء تنزيل الملف التالي
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
     except Exception as e:
         logging.error(f"فشل معالجة الطابور: {str(e)}")
         await app.send_message(chat_id, f"⚠️ حدث خطأ جسيم: {str(e)}")
@@ -152,16 +169,18 @@ async def process_queue(chat_id):
 # ---------- معالجة الأحداث ---------- #
 @app.on_message(filters.video | filters.document)
 async def on_video_receive(client, message):
-    """إضافة الفيديو إلى الطابور"""
+    """إضافة الفيديو إلى الطابور وحفظ رسالة التأكيد"""
     chat_id = message.chat.id
     cq = chat_queues[chat_id]
     await cq.queue.put(message)
     
-    await app.send_message(
+    confirm_msg = await app.send_message(
         chat_id,
         f"📥 تمت الإضافة إلى القائمة (الموقع: {cq.queue.qsize()})",
         reply_to_message_id=message.id
     )
+    # تخزين معرف رسالة التأكيد باستخدام معرف رسالة المستخدم كمرجع
+    confirmation_messages[message.message_id] = confirm_msg.message_id
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
@@ -173,7 +192,8 @@ async def start(client, message):
         "• نظام طابور ذكي لكل دردشة\n"
         "• إعادة محاولة تلقائية عند الأخطاء\n"
         "• تأخير 5 ثوانٍ قبل رفع الفيديو\n"
-        "• تأخير 3 ثوانٍ بين كل ملف (بعد رفع الملف الحالي)"
+        "• تأخير 3 ثوانٍ بين كل ملف (بعد رفع الملف الحالي)\n"
+        "• حذف رسالة المستخدم ورسالة التأكيد بعد المعالجة والرفع الناجح"
     )
     await message.reply(text)
 
