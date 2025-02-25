@@ -291,3 +291,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         TEMP_DIR.cleanup()
         logging.info("تم إيقاف البوت بنجاح")
+
