@@ -2,8 +2,10 @@ import os
 import threading
 import time
 import queue
+import subprocess
 from collections import defaultdict
 from pyrogram import Client, filters
+from moviepy.editor import VideoFileClip
 
 # ---------- Configuration ---------- #
 bot_token = os.environ.get("TOKEN", "")
@@ -11,112 +13,139 @@ api_hash = os.environ.get("HASH", "")
 api_id = os.environ.get("ID", "")
 
 # ---------- Global Variables ---------- #
-app = Client("video_converter_bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
-user_tasks = defaultdict(dict)  # تخزين مهام المستخدمين
-task_queue = queue.Queue()      # قائمة انتظار المهام
-MAX_WORKERS = 3                # أقصى عدد للخيوط العاملة
+app = Client("video_bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+task_queue = queue.Queue()
+MAX_WORKERS = 3
 
-# ---------- Worker Threads Management ---------- #
-class WorkerManager:
+# ---------- Video Processing Functions ---------- #
+def extract_video_metadata(file_path):
+    """استخراج معلومات الفيديو باستخدام moviepy"""
+    with VideoFileClip(file_path) as clip:
+        return {
+            'duration': int(clip.duration),
+            'width': clip.size[0],
+            'height': clip.size[1],
+            'fps': clip.fps
+        }
+
+def generate_thumbnail(video_path, output_path="thumbnail.jpg"):
+    """إنشاء صورة مصغرة باستخدام ffmpeg"""
+    cmd = [
+        'ffmpeg',
+        '-i', video_path,
+        '-ss', '00:00:01',
+        '-vframes', '1',
+        '-vf', 'scale=320:-1',
+        output_path
+    ]
+    subprocess.run(cmd, stderr=subprocess.DEVNULL)
+    return output_path if os.path.exists(output_path) else None
+
+# ---------- Worker Class ---------- #
+class VideoProcessor:
     def __init__(self):
         self.active_workers = 0
         self.lock = threading.Lock()
 
-    def start_worker(self):
-        with self.lock:
-            if self.active_workers < MAX_WORKERS:
-                worker = threading.Thread(target=self.process_queue, daemon=True)
-                worker.start()
-                self.active_workers += 1
-
-    def process_queue(self):
-        while True:
-            try:
-                task = task_queue.get(timeout=30)
-                if task is None:
-                    break
-                self.handle_task(task)
-            except queue.Empty:
-                with self.lock:
-                    self.active_workers -= 1
-                    break
-
-    def handle_task(self, task):
+    def process_task(self, message):
         try:
-            user_id, message = task
-            # معالجة الفيديو هنا
-            self.process_video(user_id, message)
+            # تنزيل الفيديو
+            temp_file = self.download_video(message)
+            
+            # استخراج المعلومات
+            metadata = extract_video_metadata(temp_file)
+            thumb_path = generate_thumbnail(temp_file)
+            
+            # رفع الفيديو مع الخصائص
+            self.upload_video(
+                message=message,
+                video_path=temp_file,
+                duration=metadata['duration'],
+                width=metadata['width'],
+                height=metadata['height'],
+                thumbnail=thumb_path
+            )
+            
         except Exception as e:
             error_msg = f"❌ فشل في المعالجة: {str(e)}"
-            app.send_message(user_id, error_msg)
+            app.send_message(message.chat.id, error_msg)
         finally:
-            task_queue.task_done()
+            # تنظيف الملفات المؤقتة
+            if temp_file and os.path.exists(temp_file):
+                os.remove(temp_file)
+            if thumb_path and os.path.exists(thumb_path):
+                os.remove(thumb_path)
 
-    def process_video(self, user_id, message):
-        # إرسال رسالة بدء المعالجة
-        status_msg = app.send_message(user_id, "⏳ جاري معالجة الفيديو...", reply_to_message_id=message.id)
-
-        # تنزيل الفيديو
-        video_path = self.download_media(message)
-        
-        # معالجة الفيديو (يمكن إضافة التحويل هنا)
-        # ...
-        
-        # إعادة رفع الفيديو
-        self.upload_media(message, video_path, status_msg)
-        
-        # تنظيف الملفات المؤقتة
-        os.remove(video_path)
-
-    def download_media(self, message):
-        # تنزيل الملف مع تتبع التقدم
+    def download_video(self, message):
         temp_file = f"temp_{message.id}.mp4"
         return app.download_media(message, file_name=temp_file)
 
-    def upload_media(self, message, file_path, status_msg):
-        # رفع الملف مع تتبع التقدم
+    def upload_video(self, message, video_path, duration, width, height, thumbnail):
+        # إرسال رسالة تقدم
+        progress_msg = app.send_message(message.chat.id, "⏳ جاري الرفع...")
+        
+        # رفع الفيديو مع جميع الخصائص
         app.send_video(
             chat_id=message.chat.id,
-            video=file_path,
-            reply_to_message_id=message.id
+            video=video_path,
+            duration=duration,
+            width=width,
+            height=height,
+            thumb=thumbnail,
+            caption=f"🎥 {os.path.basename(video_path)}",
+            reply_to_message_id=message.id,
+            progress=self.upload_progress,
+            progress_args=(progress_msg,)
         )
-        app.delete_messages(message.chat.id, status_msg.id)
+        
+        # حذف رسالة التقدم
+        app.delete_messages(message.chat.id, progress_msg.id)
 
-worker_manager = WorkerManager()
+    def upload_progress(self, current, total, progress_msg):
+        percent = current * 100 / total
+        try:
+            app.edit_message_text(
+                chat_id=progress_msg.chat.id,
+                message_id=progress_msg.id,
+                text=f"📤 جاري الرفع: {percent:.1f}%"
+            )
+        except:
+            pass
 
 # ---------- Bot Handlers ---------- #
-@app.on_message(filters.video)
-def handle_video(client, message):
-    # إضافة المهمة إلى قائمة الانتظار
-    task_queue.put((message.chat.id, message))
-    worker_manager.start_worker()
-    
-    # إعلام المستخدم بإضافة المهمة
-    app.send_message(
-        message.chat.id,
-        f"📥 تمت إضافة الفيديو إلى قائمة الانتظار (الموقع: {task_queue.qsize()})",
-        reply_to_message_id=message.id
-    )
+video_processor = VideoProcessor()
 
-@app.on_message(filters.command("status"))
-def show_status(client, message):
-    # عرض حالة النظام
-    status_info = (
-        f"🔄 الخيوط النشطة: {worker_manager.active_workers}\n"
-        f"📥 المهام في الانتظار: {task_queue.qsize()}"
-    )
-    app.send_message(message.chat.id, status_info)
+@app.on_message(filters.video | filters.document)
+def handle_video(client, message):
+    task_queue.put(message)
+    process_queue()
+
+def process_queue():
+    if not task_queue.empty() and video_processor.active_workers < MAX_WORKERS:
+        with video_processor.lock:
+            video_processor.active_workers += 1
+        
+        message = task_queue.get()
+        worker = threading.Thread(
+            target=video_processor.process_task,
+            args=(message,),
+            daemon=True
+        )
+        worker.start()
 
 @app.on_message(filters.command("start"))
 def start(client, message):
-    welcome_msg = (
-        "مرحبًا بك في بوت تحويل الفيديوهات! 🎥\n\n"
-        "أرسل لي أي فيديو وسأقوم بمعالجته وإعادته لك بتنسيق مناسب للبث.\n"
-        "يمكنك مراقبة حالة النظام باستخدام الأمر /status"
+    help_text = (
+        "مرحبًا! 👋\n"
+        "أرسل لي أي فيديو وسأقوم برفعه مع:\n"
+        "- الصورة المصغرة التلقائية\n"
+        "- مدة الفيديو\n"
+        "- دقة الفيديو الأصلية\n"
+        "- التنسيق الأمثل للبث"
     )
-    app.send_message(message.chat.id, welcome_msg)
+    app.send_message(message.chat.id, help_text)
 
-# ---------- Main Execution ---------- #
+# ---------- Run Bot ---------- #
 if __name__ == "__main__":
-    print("Starting the bot...")
+    print("✅ البوت يعمل الآن...")
     app.run()
