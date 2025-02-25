@@ -85,6 +85,7 @@ async def process_video(chat_id, message):
     - تنزيل الملف، إصلاحه باستخدام ffmpeg،
     - استخراج البيانات باستخدام MoviePy وإنشاء صورة مصغرة.
     تُعيد الدالة قاموسًا يحتوي على بيانات الفيديو المعالج.
+    بعد الانتهاء يتم حذف رسالة المستخدم ورسالة التأكيد فوراً.
     """
     temp_file = None
     thumb = None
@@ -125,8 +126,8 @@ async def process_video(chat_id, message):
         # إنشاء الصورة المصغرة
         thumb = await handle_errors(generate_thumbnail, temp_file)
 
-        logging.info("انتظار 1 ثوانٍ بعد المعالجة...")
-        await asyncio.sleep(1)
+        logging.info("انتظار 5 ثوانٍ بعد المعالجة...")
+        await asyncio.sleep(5)
 
         # إعداد البيانات لإرسال الألبوم لاحقًا
         result = {
@@ -134,10 +135,24 @@ async def process_video(chat_id, message):
             "thumb": thumb,
             "duration": metadata['duration'],
             "width": metadata['width'],
-            "height": metadata['height'],
-            "user_message_id": message.id,
-            "confirmation_msg_id": confirmation_messages.pop(message.id, None)
+            "height": metadata['height']
         }
+        
+        # حذف رسالة المستخدم والتأكيد فور انتهاء المعالجة
+        try:
+            await app.delete_messages(chat_id, message.id)
+            logging.info(f"تم حذف رسالة المستخدم {message.id}.")
+        except Exception as e:
+            logging.error(f"فشل حذف رسالة المستخدم {message.id}: {e}")
+        
+        conf_msg_id = confirmation_messages.pop(message.id, None)
+        if conf_msg_id:
+            try:
+                await app.delete_messages(chat_id, conf_msg_id)
+                logging.info(f"تم حذف رسالة التأكيد {conf_msg_id}.")
+            except Exception as e:
+                logging.error(f"فشل حذف رسالة التأكيد {conf_msg_id}: {e}")
+        
         logging.info(f"تمت معالجة الفيديو بنجاح: {temp_file}")
         return result
 
@@ -153,7 +168,7 @@ async def send_album(chat_id, album_videos):
     """
     إرسال مجموعة من الفيديوهات كألبوم باستخدام send_media_group.
     يتم تعيين "حصريات🌈" كتعليق على أول فيديو.
-    بعد الإرسال، يتم حذف رسائل المستخدم والتأكيد والملفات المؤقتة.
+    بعد الإرسال، يتم حذف الملفات المؤقتة.
     يُرسل الألبوم إلى القناة (CHANNEL_ID) إن كانت محددة.
     """
     media_list = []
@@ -180,32 +195,21 @@ async def send_album(chat_id, album_videos):
         logging.error(f"فشل رفع الألبوم: {e}")
         raise
 
-    # بعد الإرسال، نقوم بحذف رسائل المستخدم والتأكيد والملفات المؤقتة
+    # بعد الإرسال، نقوم بحذف الملفات المؤقتة
     for video in album_videos:
-        try:
-            await app.delete_messages(chat_id, video["user_message_id"])
-            logging.info(f"تم حذف رسالة المستخدم {video['user_message_id']}.")
-        except Exception as e:
-            logging.error(f"فشل حذف رسالة المستخدم {video['user_message_id']}: {e}")
-        if video["confirmation_msg_id"]:
-            try:
-                await app.delete_messages(chat_id, video["confirmation_msg_id"])
-                logging.info(f"تم حذف رسالة التأكيد {video['confirmation_msg_id']}.")
-            except Exception as e:
-                logging.error(f"فشل حذف رسالة التأكيد {video['confirmation_msg_id']}: {e}")
         if os.path.exists(video["file_path"]):
             os.remove(video["file_path"])
         if video["thumb"] and os.path.exists(video["thumb"]):
             os.remove(video["thumb"])
     
     logging.info("انتظار 10 ثوانٍ قبل إمكانية إرسال ألبوم جديد ...")
-    await asyncio.sleep(30)
+    await asyncio.sleep(10)
 
 async def process_queue(chat_id):
     """
     معالجة طابور دردشة واحدة:
     تتم معالجة كل رسالة فيديو وإضافة بياناتها إلى قائمة الألبوم.
-    عند وصول عدد الفيديوهات إلى 10 (أو أكثر) يتم إرسال كل دفعة من 10 فيديوهات،
+    عند وصول عدد الفيديوهات إلى 10 (أو أكثر) يتم إرسال دفعة من 10 فيديوهات،
     ويتم الاحتفاظ بالفيديوهات المتبقية للانضمام إليها عند ورود فيديوهات جديدة.
     """
     cq = chat_queues[chat_id]
@@ -216,14 +220,14 @@ async def process_queue(chat_id):
             cq.album_videos.append(video_data)
             cq.queue.task_done()
             # تأخير 3 ثوانٍ قبل البدء بمعالجة الفيديو التالي
-            await asyncio.sleep(5)
-            # إذا أصبح عدد الفيديوهات في القائمة 10 أو أكثر، نرسل دفعة من 10 فيديوهات فقط
+            await asyncio.sleep(3)
+            # إذا أصبح عدد الفيديوهات في القائمة 10 أو أكثر، نرسل دفعة من 10 فيديوهات
             while len(cq.album_videos) >= 10:
                 album_to_send = cq.album_videos[:10]
                 logging.info("تم تجميع 10 فيديوهات، بدء إرسال الألبوم...")
                 await send_album(chat_id, album_to_send)
                 cq.album_videos = cq.album_videos[10:]
-        # لن نقوم بتفريغ الفيديوهات المتبقية إذا كانت أقل من 10، بحيث تبقى محفوظة للانضمام إليها عند ورود فيديوهات جديدة.
+        # إذا انتهى الطابور، نترك الفيديوهات المتبقية محفوظة للانضمام إليها عند ورود فيديوهات جديدة.
     except Exception as e:
         logging.error(f"فشل معالجة الطابور: {str(e)}")
         await app.send_message(chat_id, f"⚠️ حدث خطأ جسيم: {str(e)}")
@@ -237,7 +241,7 @@ async def queue_manager():
             if not cq.active and not cq.queue.empty():
                 cq.active = True
                 asyncio.create_task(process_queue(chat_id))
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
 # ---------- معالجة الأحداث ----------
 @app.on_message(filters.video | filters.document)
@@ -246,7 +250,7 @@ async def on_video_receive(client, message):
     عند استقبال فيديو:
     - يُضاف إلى طابور المعالجة.
     - يُرسل رسالة تأكيد للمستخدم.
-    - تُخزن رسالة التأكيد لحذفها لاحقًا بعد الإرسال.
+    - تُخزن رسالة التأكيد لحذفها لاحقًا.
     """
     chat_id = message.chat.id
     cq = chat_queues[chat_id]
@@ -273,8 +277,8 @@ async def start(client, message):
         "• تجميع 10 فيديوهات وإرسالها كألبوم مع وصف 'حصريات🌈'\n"
         "• تأخير 10 ثوانٍ بين إرسال كل ألبوم\n"
         "• إرسال الألبوم إلى القناة (إذا كان CHANNEL_ID معرفًا)\n"
-        "• حذف رسالة المستخدم ورسالة التأكيد بعد الإرسال\n"
-        "• تخزين الفيديوهات المتبقية حتى وصول العدد 10 وعدم فقدانها"
+        "• حذف رسالة المستخدم ورسالة التأكيد بعد انتهاء معالجة كل فيديو\n"
+        "• الاحتفاظ بالفيديوهات المتبقية حتى تكمل العدد 10"
     )
     await message.reply(text)
 
