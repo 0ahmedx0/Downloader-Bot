@@ -18,7 +18,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# ---------- تهيئة البوت ---------- #
+# ---------- تهيئة البوت باستخدام بوت توكن فقط ---------- #
 app = Client(
     "advanced_video_bot",
     api_id=os.environ.get("ID"),
@@ -28,13 +28,13 @@ app = Client(
 )
 
 # ---------- هياكل البيانات ---------- #
-class UserQueue:
+class ChatQueue:
     def __init__(self):
         self.queue = asyncio.Queue()
         self.active = False
         self.retry_count = 3  # عدد محاولات إعادة المحاولة
 
-user_queues = defaultdict(UserQueue)
+chat_queues = defaultdict(ChatQueue)
 TEMP_DIR = tempfile.TemporaryDirectory()  # مجلد مؤقت يتم تنظيفه تلقائيًا
 
 # ---------- وظائف أساسية ---------- #
@@ -62,8 +62,7 @@ async def generate_thumbnail(video_path):
     await proc.wait()
     return output_path if os.path.exists(output_path) else None
 
-# ---------- إدارة المهام ---------- #
-async def process_video(user_id, message):
+async def process_video(chat_id, message):
     """معالجة فيديو واحد بشكل كامل"""
     temp_file = None
     thumb = None
@@ -104,12 +103,11 @@ async def process_video(user_id, message):
         thumb = await handle_errors(generate_thumbnail, temp_file)
         
         # بدء مهمة تحديث التقدم
-        progress_task = asyncio.create_task(update_progress(user_id))
+        progress_task = asyncio.create_task(update_progress(chat_id))
         try:
-            # رفع الفيديو مع البيانات المصاحبة
             await handle_errors(
                 app.send_video,
-                chat_id=user_id,
+                chat_id=chat_id,
                 video=temp_file,
                 duration=metadata['duration'],
                 width=metadata['width'],
@@ -131,37 +129,37 @@ async def process_video(user_id, message):
 async def queue_manager():
     """مدير الطوابير الأساسي"""
     while True:
-        for user_id, uq in list(user_queues.items()):
-            if not uq.active and not uq.queue.empty():
-                uq.active = True
-                asyncio.create_task(process_queue(user_id))
+        for chat_id, cq in list(chat_queues.items()):
+            if not cq.active and not cq.queue.empty():
+                cq.active = True
+                asyncio.create_task(process_queue(chat_id))
         await asyncio.sleep(1)
 
-async def process_queue(user_id):
-    """معالجة طابور مستخدم واحد"""
-    uq = user_queues[user_id]
+async def process_queue(chat_id):
+    """معالجة طابور دردشة واحدة"""
+    cq = chat_queues[chat_id]
     try:
-        while not uq.queue.empty():
-            message = await uq.queue.get()
-            await process_video(user_id, message)
-            uq.queue.task_done()
+        while not cq.queue.empty():
+            message = await cq.queue.get()
+            await process_video(chat_id, message)
+            cq.queue.task_done()
     except Exception as e:
         logging.error(f"فشل معالجة الطابور: {str(e)}")
-        await app.send_message(user_id, f"⚠️ حدث خطأ جسيم: {str(e)}")
+        await app.send_message(chat_id, f"⚠️ حدث خطأ جسيم: {str(e)}")
     finally:
-        uq.active = False
+        cq.active = False
 
-async def update_progress(user_id):
+async def update_progress(chat_id):
     """تحديث التقدم كل 5 ثواني"""
-    progress_msg = await app.send_message(user_id, "⏳ جاري التحضير...")
+    progress_msg = await app.send_message(chat_id, "⏳ جاري التحضير...")
     last_update = 0
     try:
         while True:
             if time.time() - last_update > 5:
                 await progress_msg.edit_text(
                     f"📊 الحالة:\n"
-                    f"• المهام المتبقية: {user_queues[user_id].queue.qsize()}\n"
-                    f"• المحاولات المتبقية: {user_queues[user_id].retry_count}"
+                    f"• المهام المتبقية: {chat_queues[chat_id].queue.qsize()}\n"
+                    f"• المحاولات المتبقية: {chat_queues[chat_id].retry_count}"
                 )
                 last_update = time.time()
             await asyncio.sleep(1)
@@ -172,13 +170,13 @@ async def update_progress(user_id):
 @app.on_message(filters.video | filters.document)
 async def on_video_receive(client, message):
     """إضافة الفيديو إلى الطابور"""
-    user_id = message.from_user.id
-    uq = user_queues[user_id]
-    await uq.queue.put(message)
+    chat_id = message.chat.id
+    cq = chat_queues[chat_id]
+    await cq.queue.put(message)
     
     await app.send_message(
-        user_id,
-        f"📥 تمت الإضافة إلى القائمة (الموقع: {uq.queue.qsize()})",
+        chat_id,
+        f"📥 تمت الإضافة إلى القائمة (الموقع: {cq.queue.qsize()})",
         reply_to_message_id=message.id
     )
 
@@ -189,7 +187,7 @@ async def start(client, message):
         "مرحبًا في بوت معالجة الفيديو المتقدم! 🎥\n\n"
         "المميزات:\n"
         "• معالجة غير محدودة للفيديوهات\n"
-        "• نظام طابور ذكي لكل مستخدم\n"
+        "• نظام طابور ذكي لكل دردشة\n"
         "• تحديثات حالة كل 5 ثواني\n"
         "• إعادة محاولة تلقائية عند الأخطاء"
     )
