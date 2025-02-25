@@ -107,8 +107,8 @@ async def process_video(chat_id, message):
         thumb = await handle_errors(generate_thumbnail, temp_file)
         
         # تأخير 5 ثوانٍ قبل بدء عملية الرفع
-        logging.info("انتظار 5 ثوانٍ قبل بدء رفع الملف ...")
-        await asyncio.sleep(5)
+        logging.info("انتظار 3 ثوانٍ قبل بدء رفع الملف ...")
+        await asyncio.sleep(3)
         
         # بدء عملية الرفع
         logging.info("بدء رفع الملف ...")
@@ -166,7 +166,8 @@ async def process_queue(chat_id):
             await process_video(chat_id, message)
             cq.queue.task_done()
             # تأخير 3 ثوانٍ قبل بدء تنزيل الملف التالي
-            await asyncio.sleep(3)
+            logging.info("انتظار 5 ثوانٍ قبل بدء رفع الملف ...")
+            await asyncio.sleep(5)
     except Exception as e:
         logging.error(f"فشل معالجة الطابور: {str(e)}")
         await app.send_message(chat_id, f"⚠️ حدث خطأ جسيم: {str(e)}")
