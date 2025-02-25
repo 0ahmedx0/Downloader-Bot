@@ -125,8 +125,8 @@ async def process_video(chat_id, message):
         # إنشاء الصورة المصغرة
         thumb = await handle_errors(generate_thumbnail, temp_file)
 
-        logging.info("انتظار 5 ثوانٍ بعد المعالجة...")
-        await asyncio.sleep(5)
+        logging.info("انتظار 1 ثوانٍ بعد المعالجة...")
+        await asyncio.sleep(1)
 
         # إعداد البيانات لإرسال الألبوم لاحقًا
         result = {
@@ -199,7 +199,7 @@ async def send_album(chat_id, album_videos):
             os.remove(video["thumb"])
     
     logging.info("انتظار 10 ثوانٍ قبل إمكانية إرسال ألبوم جديد ...")
-    await asyncio.sleep(10)
+    await asyncio.sleep(30)
 
 async def process_queue(chat_id):
     """
@@ -216,7 +216,7 @@ async def process_queue(chat_id):
             cq.album_videos.append(video_data)
             cq.queue.task_done()
             # تأخير 3 ثوانٍ قبل البدء بمعالجة الفيديو التالي
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
             # إذا أصبح عدد الفيديوهات في القائمة 10 أو أكثر، نرسل دفعة من 10 فيديوهات فقط
             while len(cq.album_videos) >= 10:
                 album_to_send = cq.album_videos[:10]
@@ -237,7 +237,7 @@ async def queue_manager():
             if not cq.active and not cq.queue.empty():
                 cq.active = True
                 asyncio.create_task(process_queue(chat_id))
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
 # ---------- معالجة الأحداث ----------
 @app.on_message(filters.video | filters.document)
