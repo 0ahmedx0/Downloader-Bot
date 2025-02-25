@@ -126,7 +126,7 @@ async def process_video(chat_id, message):
         thumb = await handle_errors(generate_thumbnail, temp_file)
 
         logging.info("انتظار 5 ثوانٍ بعد المعالجة...")
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
 
         # إعادة البيانات المطلوبة لإرسال الألبوم لاحقًا
         result = {
@@ -216,7 +216,7 @@ async def process_queue(chat_id):
             cq.album_videos.append(video_data)
             cq.queue.task_done()
             # تأخير 3 ثوانٍ قبل البدء بمعالجة الفيديو التالي
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
             if len(cq.album_videos) >= 10:
                 logging.info(f"تم تجميع {len(cq.album_videos)} فيديوهات، بدء إرسال الألبوم...")
                 await send_album(chat_id, cq.album_videos)
