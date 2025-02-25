@@ -122,12 +122,12 @@ async def process_video(chat_id, message):
         
         # حذف رسالة المستخدم بعد رفع الفيديو بنجاح
         try:
-            await app.delete_messages(chat_id, message.message_id)
+            await app.delete_messages(chat_id, message.id)
         except Exception as del_exc:
             logging.error(f"فشل حذف رسالة المستخدم: {del_exc}")
         
         # حذف رسالة التأكيد المرسلة من البوت
-        confirmation_msg_id = confirmation_messages.pop(message.message_id, None)
+        confirmation_msg_id = confirmation_messages.pop(message.id, None)
         if confirmation_msg_id:
             try:
                 await app.delete_messages(chat_id, confirmation_msg_id)
@@ -179,8 +179,8 @@ async def on_video_receive(client, message):
         f"📥 تمت الإضافة إلى القائمة (الموقع: {cq.queue.qsize()})",
         reply_to_message_id=message.id
     )
-    # تخزين معرف رسالة التأكيد باستخدام معرف رسالة المستخدم كمرجع
-    confirmation_messages[message.message_id] = confirm_msg.message_id
+    # تخزين معرف رسالة التأكيد باستخدام message.id كمرجع
+    confirmation_messages[message.id] = confirm_msg.id
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
