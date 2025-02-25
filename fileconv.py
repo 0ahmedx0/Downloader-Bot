@@ -2,89 +2,97 @@ import os
 import asyncio
 import logging
 import tempfile
-import subprocess
+import time
 from collections import defaultdict
 from pyrogram import Client, filters, enums
 from moviepy.editor import VideoFileClip
 
-# إصلاح مشاكل البيئة
-os.environ.update({
-    'XDG_RUNTIME_DIR': '/tmp/runtime-user',
-    'ALSA_CONFIG_PATH': '/dev/null',
-    'PYROGRAM_SILENT_FFMPEG': '1'
-})
+# ---------- إعدادات البيئة ---------- #
+runtime_dir = '/tmp/runtime-user'
+if not os.path.exists(runtime_dir):
+    os.makedirs(runtime_dir, mode=0o700)
+os.environ['XDG_RUNTIME_DIR'] = runtime_dir
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
+# ---------- تهيئة البوت ---------- #
 app = Client(
-    "video_bot_fixed",
+    "advanced_video_bot",
     api_id=os.environ.get("ID"),
     api_hash=os.environ.get("HASH"),
     bot_token=os.environ.get("TOKEN"),
     parse_mode=enums.ParseMode.MARKDOWN
 )
 
-# هياكل البيانات المحسنة
+# ---------- هياكل البيانات ---------- #
 class UserQueue:
     def __init__(self):
         self.queue = asyncio.Queue()
         self.active = False
-        self.progress_task = None
-        self.current_processing = None
+        self.retry_count = 3  # عدد محاولات إعادة المحاولة
 
 user_queues = defaultdict(UserQueue)
-TEMP_DIR = tempfile.TemporaryDirectory()
+TEMP_DIR = tempfile.TemporaryDirectory()  # مجلد مؤقت يتم تنظيفه تلقائيًا
 
-async def verify_video_file(file_path):
-    """التحقق من سلامة الفيديو باستخدام ffprobe"""
+# ---------- وظائف أساسية ---------- #
+async def handle_errors(func, *args, **kwargs):
+    """معالجة الأخطاء مع إعادة المحاولة"""
+    for attempt in range(1, 4):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            logging.error(f"محاولة {attempt} فشلت: {str(e)}")
+            if attempt == 3:
+                raise
+            await asyncio.sleep(2 ** attempt)
+
+async def generate_thumbnail(video_path):
+    """إنشاء صورة مصغرة مع إدارة الأخطاء"""
+    output_path = os.path.join(TEMP_DIR.name, f"thumb_{os.path.basename(video_path)}.jpg")
+    cmd = [
+        'ffmpeg', '-y', '-loglevel', 'error',
+        '-i', video_path, '-ss', '00:00:01',
+        '-vframes', '1', '-vf', 'scale=320:-1',
+        output_path
+    ]
+    proc = await asyncio.create_subprocess_exec(*cmd)
+    await proc.wait()
+    return output_path if os.path.exists(output_path) else None
+
+# ---------- إدارة المهام ---------- #
+async def process_video(user_id, message):
+    """معالجة فيديو واحد بشكل كامل"""
+    temp_file = None
+    thumb = None
+
     try:
+        # تنزيل الملف مع إعادة المحاولة
+        temp_file = await handle_errors(
+            app.download_media,
+            message,
+            file_name=os.path.join(TEMP_DIR.name, f"temp_{message.id}.mp4")
+        )
+        
+        # محاولة إصلاح الفيديو بإعادة تغليفه باستخدام ffmpeg
+        fixed_file = os.path.join(TEMP_DIR.name, f"fixed_{message.id}.mp4")
         cmd = [
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'default=noprint_wrappers=1:nokey=1',
-            file_path
+            'ffmpeg', '-y', '-i', temp_file, '-c', 'copy',
+            '-movflags', 'faststart', fixed_file
         ]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        _, stderr = await proc.communicate()
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0 and os.path.exists(fixed_file):
+            os.remove(temp_file)
+            temp_file = fixed_file
         
-        if proc.returncode != 0:
-            raise Exception(f"FFprobe error: {stderr.decode().strip()}")
-            
-        return True
-    except Exception as e:
-        logging.error(f"File verification failed: {str(e)}")
-        return False
-
-async def safe_download(message):
-    """تنزيل الملف مع التحقق من السلامة"""
-    temp_file = os.path.join(TEMP_DIR.name, f"temp_{message.id}.mp4")
-    
-    # التنزيل
-    await app.download_media(message, file_name=temp_file)
-    
-    # التحقق من الملف
-    if not await verify_video_file(temp_file):
-        raise ValueError("الملف التالف أو غير مكتمل")
-    
-    return temp_file
-
-async def process_video(user_id, message):
-    uq = user_queues[user_id]
-    temp_file = None
-    thumb = None
-    
-    try:
-        # التنزيل الآمن
-        temp_file = await safe_download(message)
-        
-        # استخراج الميتاداتا
+        # استخراج بيانات الفيديو باستخدام MoviePy
         with VideoFileClip(temp_file, audio=False) as clip:
             metadata = {
                 'duration': int(clip.duration),
@@ -92,121 +100,82 @@ async def process_video(user_id, message):
                 'height': clip.size[1]
             }
         
-        # إنشاء الثمبنييل
-        thumb = await generate_thumbnail(temp_file)
+        # إنشاء الصورة المصغرة
+        thumb = await handle_errors(generate_thumbnail, temp_file)
         
-        # الرفع مع التحكم بالتقدم
-        await upload_video(user_id, message, temp_file, metadata, thumb)
-        
-    except Exception as e:
-        await handle_upload_error(user_id, message, str(e))
-        
-    finally:
-        await cleanup_resources(temp_file, thumb)
-        uq.current_processing = None
-
-async def generate_thumbnail(video_path):
-    """إنشاء صورة مصغرة مع التعامل مع الأخطاء"""
-    try:
-        output_path = os.path.join(TEMP_DIR.name, f"thumb_{os.path.basename(video_path)}.jpg")
-        cmd = [
-            'ffmpeg', '-y', '-loglevel', 'error',
-            '-i', video_path, '-ss', '00:00:01',
-            '-vframes', '1', '-vf', 'scale=320:-1',
-            output_path
-        ]
-        proc = await asyncio.create_subprocess_exec(*cmd)
-        await proc.wait()
-        return output_path if os.path.exists(output_path) else None
-    except Exception as e:
-        logging.error(f"Thumbnail error: {str(e)}")
-        return None
-
-async def upload_video(user_id, message, file_path, metadata, thumb):
-    """الرفع مع التحكم في المعدل"""
-    progress_msg = None
-    try:
-        progress_msg = await app.send_message(user_id, "⏳ جاري الرفع...")
-        
-        await app.send_video(
-            chat_id=user_id,
-            video=file_path,
-            duration=metadata['duration'],
-            width=metadata['width'],
-            height=metadata['height'],
-            thumb=thumb,
-            caption=f"✅ {os.path.basename(file_path)}",
-            reply_to_message_id=message.id,
-            progress=create_progress_callback(progress_msg)
-        )
+        # بدء مهمة تحديث التقدم
+        progress_task = asyncio.create_task(update_progress(user_id))
+        try:
+            # رفع الفيديو مع البيانات المصاحبة
+            await handle_errors(
+                app.send_video,
+                chat_id=user_id,
+                video=temp_file,
+                duration=metadata['duration'],
+                width=metadata['width'],
+                height=metadata['height'],
+                thumb=thumb,
+                caption=f"✅ {os.path.basename(temp_file)}",
+                reply_to_message_id=message.id
+            )
+        finally:
+            progress_task.cancel()
         
     finally:
-        if progress_msg:
-            await progress_msg.delete()
+        # التنظيف: حذف الملفات المؤقتة
+        if temp_file and os.path.exists(temp_file):
+            os.remove(temp_file)
+        if thumb and os.path.exists(thumb):
+            os.remove(thumb)
 
-def create_progress_callback(progress_msg):
-    """إنشاء دالة تحديث التقدم"""
-    last_update = 0
-    
-    async def callback(current, total):
-        nonlocal last_update
-        if time.time() - last_update > 5:
-            percent = current * 100 / total
-            try:
-                await progress_msg.edit_text(f"📤 جاري الرفع: {percent:.1f}%")
-                last_update = time.time()
-            except:
-                pass
-    return callback
-
-async def handle_upload_error(user_id, message, error):
-    """معالجة أخطاء الرفع"""
-    logging.error(f"Upload error: {error}")
-    await app.send_message(
-        user_id,
-        f"❌ فشل في معالجة الملف:\n{error}",
-        reply_to_message_id=message.id
-    )
-
-async def cleanup_resources(*files):
-    """تنظيف الملفات المؤقتة"""
-    for f in files:
-        if f and os.path.exists(f):
-            try:
-                os.remove(f)
-            except Exception as e:
-                logging.error(f"Cleanup error: {str(e)}")
-
-async def queue_supervisor():
-    """مراقب الطوابير الرئيسي"""
+async def queue_manager():
+    """مدير الطوابير الأساسي"""
     while True:
         for user_id, uq in list(user_queues.items()):
             if not uq.active and not uq.queue.empty():
                 uq.active = True
-                asyncio.create_task(process_user_queue(user_id))
+                asyncio.create_task(process_queue(user_id))
         await asyncio.sleep(1)
 
-async def process_user_queue(user_id):
+async def process_queue(user_id):
     """معالجة طابور مستخدم واحد"""
     uq = user_queues[user_id]
     try:
         while not uq.queue.empty():
             message = await uq.queue.get()
-            uq.current_processing = message
             await process_video(user_id, message)
             uq.queue.task_done()
     except Exception as e:
-        logging.error(f"Queue error: {str(e)}")
+        logging.error(f"فشل معالجة الطابور: {str(e)}")
+        await app.send_message(user_id, f"⚠️ حدث خطأ جسيم: {str(e)}")
     finally:
         uq.active = False
 
+async def update_progress(user_id):
+    """تحديث التقدم كل 5 ثواني"""
+    progress_msg = await app.send_message(user_id, "⏳ جاري التحضير...")
+    last_update = 0
+    try:
+        while True:
+            if time.time() - last_update > 5:
+                await progress_msg.edit_text(
+                    f"📊 الحالة:\n"
+                    f"• المهام المتبقية: {user_queues[user_id].queue.qsize()}\n"
+                    f"• المحاولات المتبقية: {user_queues[user_id].retry_count}"
+                )
+                last_update = time.time()
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass
+
+# ---------- معالجة الأحداث ---------- #
 @app.on_message(filters.video | filters.document)
-async def handle_video(client, message):
-    """إدارة الفيديوهات الواردة"""
+async def on_video_receive(client, message):
+    """إضافة الفيديو إلى الطابور"""
     user_id = message.from_user.id
     uq = user_queues[user_id]
-    
     await uq.queue.put(message)
+    
     await app.send_message(
         user_id,
         f"📥 تمت الإضافة إلى القائمة (الموقع: {uq.queue.qsize()})",
@@ -215,25 +184,23 @@ async def handle_video(client, message):
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
-    """رسالة الترحيب"""
+    """رسالة البدء"""
     text = (
-        "مرحبًا في بوت معالجة الفيديو المتقدم! 🎥\n"
-        "أرسل الفيديوهات وسيتم معالجتها واحدة تلو الأخرى\n"
-        "ميزات البوت:\n"
-        "- تحقق من سلامة الملفات\n"
-        "- معالجة تسلسلية آمنة\n"
-        "- إدارة أخطاء محسنة"
+        "مرحبًا في بوت معالجة الفيديو المتقدم! 🎥\n\n"
+        "المميزات:\n"
+        "• معالجة غير محدودة للفيديوهات\n"
+        "• نظام طابور ذكي لكل مستخدم\n"
+        "• تحديثات حالة كل 5 ثواني\n"
+        "• إعادة محاولة تلقائية عند الأخطاء"
     )
     await message.reply(text)
 
+# ---------- التشغيل ---------- #
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
     try:
-        loop.create_task(queue_supervisor())
+        loop = asyncio.get_event_loop()
+        loop.create_task(queue_manager())
         app.run()
     except KeyboardInterrupt:
         TEMP_DIR.cleanup()
-    finally:
-        loop.close()
+        logging.info("تم إيقاف البوت بنجاح")
