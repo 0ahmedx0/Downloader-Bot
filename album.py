@@ -96,29 +96,95 @@ async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def send_media_group_with_backoff(update: Update, context: ContextTypes.DEFAULT_TYPE, input_media, channel_id, chunk_index):
     """
-    تحاول إرسال مجموعة الوسائط باستخدام تقنية exponential backoff عند حدوث خطأ RetryAfter.
+    ترسل مجموعة الوسائط إلى القناة فقط مع استخدام تقنية إعادة المحاولة عند حدوث خطأ RetryAfter.
     """
     max_retries = 5
     delay = 5  # بداية التأخير بـ 5 ثواني
     for attempt in range(max_retries):
         try:
-            # إرسال المجموعة للمستخدم
-            await update.message.reply_media_group(media=input_media)
-            # إرسال المجموعة إلى القناة لحفظها
-            if channel_id:
-                await context.bot.send_media_group(chat_id=channel_id, media=input_media)
-            return True  # إذا نجحت العملية نخرج من الدالة
+            # إرسال المجموعة فقط إلى القناة
+            await context.bot.send_media_group(chat_id=channel_id, media=input_media)
+            return True  # تم الإرسال بنجاح
         except RetryAfter as e:
-            logger.warning("RetryAfter: chunk %d, attempt %d. Waiting for %s seconds.", chunk_index + 1, attempt + 1, e.retry_after)
+            logger.warning("RetryAfter: chunk %d, attempt %d. Waiting for %s seconds.", 
+                           chunk_index + 1, attempt + 1, e.retry_after)
             await asyncio.sleep(e.retry_after)
             delay *= 2  # زيادة التأخير بشكل أُسّي
         except Exception as e:
-            logger.error("Error sending album chunk %d on attempt %d: %s", chunk_index + 1, attempt + 1, e)
-            # في حال حدوث خطأ غير مرتبط بالفيضانات، نخرج فوراً مع فشل الإرسال
-            print("Something went wrong while sending the album. Please try again in a minute or contact us.")
+            logger.error("Error sending album chunk %d on attempt %d: %s", 
+                         chunk_index + 1, attempt + 1, e)
+            print("حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة مرة أخرى لاحقاً أو التواصل معنا.")
             return False
-    # إذا استنفذنا المحاولات دون نجاح نرجع False
     return False
+
+async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    دالة إنشاء الألبوم التي تجمع الوسائط المرسلة وتُرسلها كألبوم إلى القناة فقط.
+    """
+    media_queue = context.user_data.get("media_queue", [])
+    total_media = len(media_queue)
+
+    if total_media < 2:
+        print("ليس هناك عدد كافٍ من الوسائط لإنشاء ألبوم.")
+        return
+
+    logger.info("بدء تحويل الوسائط إلى ألبوم. إجمالي الوسائط المخزنة: %d", total_media)
+    
+    # تقسيم الوسائط إلى مجموعات بحد أقصى 10 عناصر لكل مجموعة
+    chunks = [media_queue[i: i + 10] for i in range(0, total_media, 10)]
+    total_albums = len(chunks)
+    processed_albums = 0
+
+    # استخدام المتغير العالمي CHANNEL_ID مباشرةً
+    global CHANNEL_ID
+    if not CHANNEL_ID:
+        print("لم يتم تعيين معرف القناة بعد. يرجى تعيين القناة أولاً.")
+        return
+
+    delay_between_albums = 30  # فترة التأخير بين إرسال كل ألبوم (بالثواني)
+
+    for index, chunk in enumerate(chunks):
+        input_media = []
+        for i, item in enumerate(chunk):
+            if i == 0:
+                # إضافة التسمية للعنصر الأول في المجموعة
+                if item["type"] == "photo":
+                    input_media.append(
+                        InputMediaPhoto(media=item["media"], caption=MESSAGES["album_caption"])
+                    )
+                elif item["type"] == "video":
+                    input_media.append(
+                        InputMediaVideo(media=item["media"], caption=MESSAGES["album_caption"])
+                    )
+            else:
+                if item["type"] == "photo":
+                    input_media.append(InputMediaPhoto(media=item["media"]))
+                elif item["type"] == "video":
+                    input_media.append(InputMediaVideo(media=item["media"]))
+
+        # إرسال المجموعة إلى القناة فقط مع إعادة المحاولة عند الضرورة
+        success = await send_media_group_with_backoff(update, context, input_media, CHANNEL_ID, index)
+        if not success:
+            logger.error("فشل إرسال الجزء %d من الألبوم بعد عدة محاولات.", index + 1)
+
+        processed_albums += 1
+        remaining_albums = total_albums - processed_albums
+        estimated_time_remaining = remaining_albums * delay_between_albums
+        minutes, seconds = divmod(estimated_time_remaining, 60)
+        time_remaining_str = f"{minutes} دقيقة و {seconds} ثانية"
+
+        progress_message = (
+            f"التقدم: {processed_albums}/{total_albums} ألبومات تم إرسالها.\n"
+            f"الوقت المتبقي المتوقع: {time_remaining_str}."
+        )
+        print(progress_message)
+        logger.info(progress_message)
+
+        await asyncio.sleep(delay_between_albums)
+
+    # تفريغ قائمة الوسائط بعد الانتهاء
+    context.user_data["media_queue"] = []
+    print("تم إرسال جميع الألبومات بنجاح إلى القناة!")
 
 async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # جلب قائمة الوسائط من بيانات المستخدم
