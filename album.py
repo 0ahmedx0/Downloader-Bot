@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-import random  # تم إضافته لتوليد تأخير عشوائي
+import random
 from telegram import (
     Update,
     KeyboardButton,
@@ -17,19 +17,6 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import RetryAfter
-
-# تعيين معرف القناة في متغيرات البيئة
-raw_channel_id = os.getenv("CHANNEL_ID")
-if raw_channel_id:
-    if raw_channel_id.startswith("@"):
-        CHANNEL_ID = raw_channel_id
-    else:
-        try:
-            CHANNEL_ID = int(raw_channel_id)
-        except ValueError:
-            CHANNEL_ID = raw_channel_id
-else:
-    CHANNEL_ID = None
 
 # إعداد التسجيل
 logging.basicConfig(
@@ -58,7 +45,7 @@ MESSAGES = {
     "album_caption": "حصريات🌈"
 }
 
-# --- دالة توليد تأخير عشوائي بين الألبومات ---
+# دالة التأخير العشوائي
 prev_delay = None
 
 def get_random_delay(min_delay=30, max_delay=90, min_diff=30):
@@ -69,6 +56,7 @@ def get_random_delay(min_delay=30, max_delay=90, min_diff=30):
     prev_delay = delay
     return delay
 
+# الأوامر الأساسية
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     username = update.effective_user.username or "human"
     message = MESSAGES["greeting"].format(username=username)
@@ -88,6 +76,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(MESSAGES["source"])
 
+# إضافة الوسائط
 async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if "media_queue" not in context.user_data:
         context.user_data["media_queue"] = []
@@ -104,12 +93,13 @@ async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["media_queue"].append({"type": "video", "media": file_id})
     logger.info("Added video: %s", file_id)
 
-async def send_media_group_with_backoff(update: Update, context: ContextTypes.DEFAULT_TYPE, input_media, channel_id, chunk_index):
+# إرسال الوسائط مع التعامل مع فيضانات تيليجرام
+async def send_media_group_with_backoff(update: Update, context: ContextTypes.DEFAULT_TYPE, input_media, chat_id, chunk_index):
     max_retries = 5
     delay = 5
     for attempt in range(max_retries):
         try:
-            await context.bot.send_media_group(chat_id=channel_id, media=input_media)
+            await context.bot.send_media_group(chat_id=chat_id, media=input_media)
             return True
         except RetryAfter as e:
             logger.warning("RetryAfter: chunk %d, attempt %d. Waiting for %s seconds.",
@@ -119,16 +109,17 @@ async def send_media_group_with_backoff(update: Update, context: ContextTypes.DE
         except Exception as e:
             logger.error("Error sending album chunk %d on attempt %d: %s",
                          chunk_index + 1, attempt + 1, e)
-            print("حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة مرة أخرى لاحقاً.")
+            await update.message.reply_text("❌ حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة لاحقاً.")
             return False
     return False
 
+# إنشاء الألبوم
 async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
 
     if total_media < 2:
-        print("Not enough media items to create an album.")
+        await update.message.reply_text("📦 تحتاج إلى إرسال صورتين أو أكثر لتكوين ألبوم.")
         return
 
     logger.info("Starting album conversion. Total media stored: %d", total_media)
@@ -137,10 +128,7 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     total_albums = len(chunks)
     processed_albums = 0
 
-    global CHANNEL_ID
-    if not CHANNEL_ID:
-        print("No channel has been set yet. Use /setchannel in your channel.")
-        return
+    chat_id = update.effective_chat.id
 
     for index, chunk in enumerate(chunks):
         input_media = []
@@ -156,13 +144,13 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 elif item["type"] == "video":
                     input_media.append(InputMediaVideo(media=item["media"]))
 
-        success = await send_media_group_with_backoff(update, context, input_media, CHANNEL_ID, index)
+        success = await send_media_group_with_backoff(update, context, input_media, chat_id, index)
         if not success:
             logger.error("Failed to send album chunk %d after retries.", index + 1)
 
         processed_albums += 1
         remaining_albums = total_albums - processed_albums
-        estimated_time_remaining = remaining_albums * 60  # تقدير مبدئي عام
+        estimated_time_remaining = remaining_albums * 60
         minutes, seconds = divmod(estimated_time_remaining, 60)
         time_remaining_str = f"{minutes} minutes and {seconds} seconds"
 
@@ -170,20 +158,20 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             f"Progress: {processed_albums}/{total_albums} albums sent.\n"
             f"Estimated time remaining: {time_remaining_str}."
         )
-        print(progress_message)
         logger.info(progress_message)
 
-        # التأخير العشوائي بين الألبومات
         delay_between_albums = get_random_delay()
         await asyncio.sleep(delay_between_albums)
 
     context.user_data["media_queue"] = []
-    print("All albums have been sent successfully!")
+    await update.message.reply_text("✅ تم إرسال جميع الألبومات بنجاح!")
 
+# إعادة ضبط قائمة الوسائط
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["media_queue"] = []
     await update.message.reply_text(MESSAGES["queue_cleared"])
 
+# تشغيل البوت
 def main() -> None:
     token = os.getenv("BOT_TOKEN")
     if not token:
