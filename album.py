@@ -1,7 +1,7 @@
 import os
 import asyncio
-import random
 import logging
+import random  # تم إضافته لتوليد تأخير عشوائي
 from telegram import (
     Update,
     KeyboardButton,
@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 from telegram.error import RetryAfter
 
-# إعداد المعرف الخاص بالقناة
+# تعيين معرف القناة في متغيرات البيئة
 raw_channel_id = os.getenv("CHANNEL_ID")
 if raw_channel_id:
     if raw_channel_id.startswith("@"):
@@ -58,8 +58,9 @@ MESSAGES = {
     "album_caption": "حصريات🌈"
 }
 
-# دالة توليد تأخير عشوائي
+# --- دالة توليد تأخير عشوائي بين الألبومات ---
 prev_delay = None
+
 def get_random_delay(min_delay=30, max_delay=90, min_diff=30):
     global prev_delay
     delay = random.randint(min_delay, max_delay)
@@ -105,6 +106,7 @@ async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def send_media_group_with_backoff(update: Update, context: ContextTypes.DEFAULT_TYPE, input_media, channel_id, chunk_index):
     max_retries = 5
+    delay = 5
     for attempt in range(max_retries):
         try:
             await context.bot.send_media_group(chat_id=channel_id, media=input_media)
@@ -113,9 +115,11 @@ async def send_media_group_with_backoff(update: Update, context: ContextTypes.DE
             logger.warning("RetryAfter: chunk %d, attempt %d. Waiting for %s seconds.",
                            chunk_index + 1, attempt + 1, e.retry_after)
             await asyncio.sleep(e.retry_after)
+            delay *= 2
         except Exception as e:
             logger.error("Error sending album chunk %d on attempt %d: %s",
                          chunk_index + 1, attempt + 1, e)
+            print("حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة مرة أخرى لاحقاً.")
             return False
     return False
 
@@ -143,13 +147,9 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         for i, item in enumerate(chunk):
             if i == 0:
                 if item["type"] == "photo":
-                    input_media.append(
-                        InputMediaPhoto(media=item["media"], caption=MESSAGES["album_caption"])
-                    )
+                    input_media.append(InputMediaPhoto(media=item["media"], caption=MESSAGES["album_caption"]))
                 elif item["type"] == "video":
-                    input_media.append(
-                        InputMediaVideo(media=item["media"], caption=MESSAGES["album_caption"])
-                    )
+                    input_media.append(InputMediaVideo(media=item["media"], caption=MESSAGES["album_caption"]))
             else:
                 if item["type"] == "photo":
                     input_media.append(InputMediaPhoto(media=item["media"]))
@@ -162,8 +162,7 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         processed_albums += 1
         remaining_albums = total_albums - processed_albums
-        delay = get_random_delay()
-        estimated_time_remaining = remaining_albums * delay
+        estimated_time_remaining = remaining_albums * 60  # تقدير مبدئي عام
         minutes, seconds = divmod(estimated_time_remaining, 60)
         time_remaining_str = f"{minutes} minutes and {seconds} seconds"
 
@@ -174,7 +173,9 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         print(progress_message)
         logger.info(progress_message)
 
-        await asyncio.sleep(delay)
+        # التأخير العشوائي بين الألبومات
+        delay_between_albums = get_random_delay()
+        await asyncio.sleep(delay_between_albums)
 
     context.user_data["media_queue"] = []
     print("All albums have been sent successfully!")
@@ -188,19 +189,24 @@ def main() -> None:
     if not token:
         logger.error("BOT_TOKEN not set in environment variables.")
         return
+
     application = Application.builder().token(token).build()
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("source", source_command))
+
     application.add_handler(MessageHandler(filters.PHOTO, add_photo))
     application.add_handler(MessageHandler(filters.VIDEO, add_video))
+
     application.add_handler(
         MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_done']}$"), create_album)
     )
     application.add_handler(
         MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$"), reset_album)
     )
+
     application.run_polling()
 
 if __name__ == '__main__':
