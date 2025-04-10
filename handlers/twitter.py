@@ -8,24 +8,18 @@ from aiogram import types, Router, F
 from aiogram.types import FSInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.exceptions import TelegramRetryAfter
-from pyrogram import Client as PyroClient  # ✅ إضافة Pyrogram
+from pyrogram import Client as PyroClient  # ✅ Pyrogram
 
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
 
-# إعدادات Pyrogram (من my.telegram.org)
+# ✅ إعدادات Pyrogram من المتغيرات البيئية (string session)
 PYROGRAM_API_ID = int(os.environ.get('ID'))
 PYROGRAM_API_HASH = os.environ.get('HASH')
-PYROGRAM_SESSION_STRING = os.environ.get('PYRO_SESSION_STRING')
-client = Client(
-    PYROGRAM_SESSION_STRING,
-    api_id=PYROGRAM_API_ID,
-    api_hash=PYROGRAM_API_HASH,
-    in_memory=True
-)
+PYROGRAM_SESSION_STRING = os.environ.get('PYRO_SESSION_STRING')  # يجب أن تكون string session
 
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_FILE_SIZE = 50 * 1024 * 1024  # حد تليجرام للملف داخل البوت
 
 router = Router()
 album_accumulator = {}
@@ -60,8 +54,14 @@ async def download_media(media_url, file_path):
         for chunk in response.iter_content(chunk_size=8192):
             file.write(chunk)
 
+# ✅ إرسال الملفات الكبيرة باستخدام string session مع Pyrogram
 async def send_large_file_pyro(chat_id, file_path, caption=None):
-    async with PyroClient(PYROGRAM_SESSION, api_id=PYROGRAM_API_ID, api_hash=PYROGRAM_API_HASH) as client:
+    async with PyroClient(
+        session_name=PYROGRAM_SESSION_STRING,
+        api_id=PYROGRAM_API_ID,
+        api_hash=PYROGRAM_API_HASH,
+        in_memory=True  # لازم لأن الجلسة هي string session
+    ) as client:
         await client.send_document(chat_id=chat_id, document=file_path, caption=caption or "")
 
 async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
@@ -89,7 +89,7 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
             elif media_type in ['video', 'gif']:
                 album_accumulator[key]["video"].append((file_name, media_type, tweet_dir))
 
-        # الصور
+        # ✅ الصور
         if len(album_accumulator[key]["image"]) >= 5:
             album_to_send = album_accumulator[key]["image"][:5]
             media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
@@ -108,24 +108,23 @@ async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
                     os.rmdir(dir_path)
             await asyncio.sleep(5)
 
-        # الفيديوهات
+        # ✅ الفيديوهات
         if len(album_accumulator[key]["video"]) >= 1:
             for file_path, _, dir_path in album_accumulator[key]["video"]:
                 if os.path.getsize(file_path) > MAX_FILE_SIZE:
                     try:
                         await send_large_file_pyro(CHANNEL_IDtwiter, file_path, caption="📤 تم رفع فيديو كبير ✅")
-                        await message.answer(f"✅ تم رفع فيديو كبير باستخدام Pyrogram: `{os.path.basename(file_path)}`")
+                        await message.answer(f"✅ تم إرسال فيديو كبير باستخدام Pyrogram: `{os.path.basename(file_path)}`")
                     except Exception as e:
                         print(f"[Pyrogram Error] {e}")
-                        await message.answer("❌ خطأ أثناء إرسال الملف الكبير.")
+                        await message.answer("❌ حصل خطأ أثناء إرسال الملف الكبير.")
                 else:
                     try:
                         await message.answer_video(FSInputFile(file_path))
                     except Exception as e:
                         print(f"Error sending video: {e}")
-                        await message.answer("❌ خطأ أثناء إرسال الفيديو.")
+                        await message.answer("❌ حصل خطأ أثناء إرسال الفيديو.")
 
-                # حذف الملفات
                 os.remove(file_path)
                 if os.path.exists(dir_path) and not os.listdir(dir_path):
                     os.rmdir(dir_path)
