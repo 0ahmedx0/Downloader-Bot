@@ -17,7 +17,13 @@ from main import bot, db, send_analytics
 # إعدادات Pyrogram (من my.telegram.org)
 PYROGRAM_API_ID = int(os.environ.get('ID'))
 PYROGRAM_API_HASH = os.environ.get('HASH')
-PYROGRAM_SESSION = os.environ.get('SESSION')
+PYROGRAM_SESSION_STRING = os.environ.get('PYRO_SESSION_STRING')
+client = Client(
+    PYROGRAM_SESSION_STRING,
+    api_id=PYROGRAM_API_ID,
+    api_hash=PYROGRAM_API_HASH,
+    in_memory=True
+)
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
