@@ -57,10 +57,10 @@ async def download_media(media_url, file_path):
 # ✅ إرسال الملفات الكبيرة باستخدام string session مع Pyrogram
 async def send_large_file_pyro(chat_id, file_path, caption=None):
     async with PyroClient(
-        session_name=PYROGRAM_SESSION_STRING,
+        PYROGRAM_SESSION_STRING,
         api_id=PYROGRAM_API_ID,
         api_hash=PYROGRAM_API_HASH,
-        in_memory=True  # لازم لأن الجلسة هي string session
+        in_memory=True
     ) as client:
         await client.send_document(chat_id=chat_id, document=file_path, caption=caption or "")
 
