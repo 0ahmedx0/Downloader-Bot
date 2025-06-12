@@ -56,8 +56,17 @@ def get_random_delay(min_delay=5, max_delay=30, min_diff=7):
     prev_delay = delay
     return delay
 
+# تهيئة بيانات المستخدم
+async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
+    """يضمن تهيئة context.user_data وقائمة الوسائط."""
+    if context.user_data is None:
+        context.user_data = {} # تأكد أن context.user_data هو قاموس
+    if "media_queue" not in context.user_data:
+        context.user_data["media_queue"] = []
+
 # الأوامر الأساسية
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await initialize_user_data(context) # تهيئة بيانات المستخدم عند بدء البوت
     username = update.effective_user.username or "human"
     message = MESSAGES["greeting"].format(username=username)
     keyboard = [
@@ -78,16 +87,14 @@ async def source_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # إضافة الوسائط
 async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if "media_queue" not in context.user_data:
-        context.user_data["media_queue"] = []
+    await initialize_user_data(context) # التأكد من تهيئة البيانات قبل الإضافة
     photo = update.message.photo[-1]
     file_id = photo.file_id
     context.user_data["media_queue"].append({"type": "photo", "media": file_id})
     logger.info("Added photo: %s", file_id)
 
 async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if "media_queue" not in context.user_data:
-        context.user_data["media_queue"] = []
+    await initialize_user_data(context) # التأكد من تهيئة البيانات قبل الإضافة
     video = update.message.video
     file_id = video.file_id
     context.user_data["media_queue"].append({"type": "video", "media": file_id})
@@ -96,7 +103,7 @@ async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # إرسال الوسائط مع التعامل مع فيضانات تيليجرام
 async def send_media_group_with_backoff(update: Update, context: ContextTypes.DEFAULT_TYPE, input_media, chat_id, chunk_index):
     max_retries = 5
-    delay = 5
+    # لا داعي لتعريف delay هنا إذا لم يتم استخدامها، استخدم retry_after مباشرة.
     for attempt in range(max_retries):
         try:
             await context.bot.send_media_group(chat_id=chat_id, media=input_media)
@@ -105,7 +112,7 @@ async def send_media_group_with_backoff(update: Update, context: ContextTypes.DE
             logger.warning("RetryAfter: chunk %d, attempt %d. Waiting for %s seconds.",
                            chunk_index + 1, attempt + 1, e.retry_after)
             await asyncio.sleep(e.retry_after)
-            delay *= 2
+            # لا تضاعف التأخير، فقط استخدم القيمة التي يطلبها التيليجرام
         except Exception as e:
             logger.error("Error sending album chunk %d on attempt %d: %s",
                          chunk_index + 1, attempt + 1, e)
@@ -115,6 +122,7 @@ async def send_media_group_with_backoff(update: Update, context: ContextTypes.DE
 
 # إنشاء الألبوم
 async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await initialize_user_data(context) # التأكد من تهيئة البيانات قبل الاستخدام
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
 
@@ -129,6 +137,8 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     processed_albums = 0
 
     chat_id = update.effective_chat.id
+
+    await update.message.reply_text("⏳ جاري إنشاء الألبوم. قد يستغرق هذا بعض الوقت...")
 
     for index, chunk in enumerate(chunks):
         input_media = []
@@ -147,26 +157,51 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         success = await send_media_group_with_backoff(update, context, input_media, chat_id, index)
         if not success:
             logger.error("Failed to send album chunk %d after retries.", index + 1)
+            # يمكن هنا أن تختار إنهاء العملية أو الاستمرار
+            await update.message.reply_text(f"⚠️ فشل إرسال جزء من الألبوم ({index + 1}/{total_albums}). سأحاول الاستمرار مع البقية.")
+            continue # حاول الاستمرار مع الشريحة التالية حتى لو فشلت هذه
 
         processed_albums += 1
         remaining_albums = total_albums - processed_albums
-        estimated_time_remaining = remaining_albums * 60
-        minutes, seconds = divmod(estimated_time_remaining, 60)
-        time_remaining_str = f"{minutes} minutes and {seconds} seconds"
+        
+        # تحسين حساب الوقت المتبقي
+        # يمكنك تتبع متوسط الوقت المستغرق لكل ألبوم بدلاً من الافتراض 60 ثانية
+        # ولكن كتقدير بسيط، نستخدم متوسط التأخير المتوقع + وقت إرسال المجموعة
+        
+        avg_delay_per_album = (get_random_delay(min_delay=5, max_delay=30, min_diff=7) + 5) # تقدير تقريبي
+        estimated_time_remaining = remaining_albums * avg_delay_per_album
+        
+        minutes, seconds = divmod(int(estimated_time_remaining), 60) # حول لعدد صحيح
+        
+        time_remaining_str = f"{minutes} دقيقة و {seconds} ثانية" if minutes > 0 else f"{seconds} ثانية"
 
+        # هذا الـ logger.info جيد، لكن قد ترغب في تحديث رسالة للمستخدم
         progress_message = (
-            f"Progress: {processed_albums}/{total_albums} albums sent.\n"
-            f"Estimated time remaining: {time_remaining_str}."
+            f"جاري إرسال الألبوم: {processed_albums}/{total_albums}\n"
+            f"الوقت المتبقي المقدر: {time_remaining_str}."
         )
         logger.info(progress_message)
+        
+        # يمكنك إرسال تحديث للمستخدم بشكل دوري إذا كانت العملية طويلة جدًا
+        # ولكن يجب توخي الحذر لتجنب رسائل كثيرة جدًا
+        if processed_albums % 2 == 0 or processed_albums == total_albums: # تحديث كل ألبومين أو عند الانتهاء
+             try:
+                 await update.message.reply_text(progress_message)
+             except Exception as e:
+                 logger.error("Failed to send progress update: %s", e)
+
 
         delay_between_albums = get_random_delay()
-        await asyncio.sleep(delay_between_albums)
+        if index < len(chunks) - 1: # لا تؤخر بعد آخر مجموعة
+            await asyncio.sleep(delay_between_albums)
 
     context.user_data["media_queue"] = []
+    await update.message.reply_text("✅ تم إنشاء جميع الألبومات بنجاح!")
+
 
 # إعادة ضبط قائمة الوسائط
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await initialize_user_data(context) # التأكد من تهيئة البيانات قبل الإعادة
     context.user_data["media_queue"] = []
     await update.message.reply_text(MESSAGES["queue_cleared"])
 
@@ -179,22 +214,27 @@ def main() -> None:
 
     application = Application.builder().token(token).build()
 
+    # يجب أن تتأكد من أن user_data يتم تهيئته عند بدء التطبيق
+    # في بعض إصدارات python-telegram-bot قد تكون context.user_data غير مهيأة لأول مرة
+    # هنا لا تحتاج إلى تهيئة خاصة في main، لكن تأكد من وجودها في Handlers.
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("source", source_command))
 
-    application.add_handler(MessageHandler(filters.PHOTO, add_photo))
-    application.add_handler(MessageHandler(filters.VIDEO, add_video))
+    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, add_photo))
+    application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, add_video))
 
     application.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_done']}$"), create_album)
+        MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_done']}$") & ~filters.COMMAND, create_album)
     )
     application.add_handler(
-        MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$"), reset_album)
+        MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$") & ~filters.COMMAND, reset_album)
     )
 
-    application.run_polling()
+    logger.info("Bot started polling...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
