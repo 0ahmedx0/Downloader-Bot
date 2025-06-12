@@ -48,7 +48,7 @@ MESSAGES = {
 # دالة التأخير العشوائي
 prev_delay = None
 
-def get_random_delay(min_delay=30, max_delay=90, min_diff=30):
+def get_random_delay(min_delay=5, max_delay=30, min_diff=7):
     global prev_delay
     delay = random.randint(min_delay, max_delay)
     while prev_delay is not None and abs(delay - prev_delay) < min_diff:
