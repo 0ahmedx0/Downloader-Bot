@@ -164,7 +164,6 @@ async def create_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await asyncio.sleep(delay_between_albums)
 
     context.user_data["media_queue"] = []
-    await update.message.reply_text("✅ تم إرسال جميع الألبومات بنجاح!")
 
 # إعادة ضبط قائمة الوسائط
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
