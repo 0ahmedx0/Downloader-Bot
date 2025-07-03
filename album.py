@@ -76,13 +76,11 @@ def get_random_delay(min_delay=5, max_delay=30, min_diff=7):
 # تهيئة بيانات المستخدم
 async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
     """يضمن تهيئة context.user_data وقائمة الوسائط."""
-    if context.user_data is None:
-        context.user_data = {}
+    # لا حاجة للتحقق من None لأن context.user_data يتم تهيئته تلقائيًا بواسطة PTB
     if "media_queue" not in context.user_data:
         context.user_data["media_queue"] = []
     if "messages_to_delete" not in context.user_data:
         context.user_data["messages_to_delete"] = []
-    # هنا لا نضع 'album_caption' لأنه يتم تحديده لكل عملية
 
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """يحذف جميع الرسائل المخزنة في قائمة messages_to_delete."""
