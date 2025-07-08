@@ -10,8 +10,9 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardRemove,
-    InputMediaPhoto, # <--- تأكد من وجود هذه
-    InputMediaVideo, # <--- وتأكد من وجود هذه
+    InputMediaPhoto,
+    InputMediaVideo,
+    KeyboardButton, # <--- تم إعادة الاستيراد هنا
 )
 from telegram.ext import (
     Application,
@@ -22,7 +23,7 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
-from telegram.error import RetryAfter, TelegramError
+from telegram.error import RetryAfter, TelegramError, BadRequest # Added BadRequest
 from telegram.constants import ParseMode
 
 
@@ -34,8 +35,8 @@ logger = logging.getLogger(__name__)
 
 # الحالات للمحادثة
 ASKING_FOR_CAPTION = 1
-ASKING_FOR_MANUAL_CAPTION = 2 # تم إعادة هذه الحالة
-ASKING_FOR_SEND_LOCATION = 3
+ASKING_FOR_MANUAL_CAPTION = 2 
+ASKING_FOR_SEND_LOCATION = 3 
 
 
 # Callbacks prefixes
@@ -72,12 +73,12 @@ MESSAGES = {
     "album_creation_error": "❌ حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة لاحقاً.",
     "album_chunk_fail": "⚠️ فشل إرسال جزء من الألبوم ({index}/{total_albums}). سأحاول الاستمرار مع البقية.",
     "cancel_caption": "لقد ألغيت عملية إنشاء الألبوم. يمكنك البدء من جديد.",
-    "album_comment_option_manual": "إدخال تعليق يدوي", # Remains a key in MESSAGES
+    "album_comment_option_manual": "إدخال تعليق يدوي",
     "ask_send_location": "أين تود إرسال الألبوم؟",
     "send_to_channel_button": "القناة 📢",
     "send_to_chat_button": "المحادثة معي 👤",
     "channel_id_missing": "❌ لم يتم ضبط معرف القناة (CHANNEL_ID) في بيئة البوت. لا يمكن الإرسال للقناة. الرجاء الاتصال بالمطور.",
-    "invalid_input_choice": "خيار غير صالح أو إدخال غير متوقع. الرجاء الاختيار من الأزرار أو إلغاء العملية.", # Corrected key
+    "invalid_input_choice": "خيار غير صالح أو إدخال غير متوقع. الرجاء الاختيار من الأزرار أو إلغاء العملية.", 
     "album_action_confirm": "{caption_status}{ask_location_prompt}", 
     "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه.",
     "caption_cancelled_by_inline_btn": "تم إلغاء عملية اختيار التعليق." 
@@ -96,7 +97,7 @@ PREDEFINED_CAPTION_OPTIONS = [
     "منوعات 🌈🔥.",
     "حصريات عربي 🌈🔥.",
     "حصريات اجنبي 🌈🔥.",
-    "لا يوجد تعليق", # خيار لعدم وجود تعليق
+    "لا يوجد تعليق", 
     MESSAGES["album_comment_option_manual"], # خيار "إدخال تعليق يدوي"
 ]
 
@@ -133,8 +134,13 @@ async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 logger.debug(f"Deleted message with ID: {msg_id} in chat {chat_id} (from messages_to_delete).")
+            except BadRequest as e: # Handle 400 Bad Request specifically for delete operations
+                if "Message to delete not found" in str(e):
+                    logger.debug(f"Message {msg_id} not found when trying to delete (already deleted?).")
+                else:
+                    logger.warning(f"Could not delete message {msg_id} in chat {chat_id}: {e}")
             except Exception as e:
-                logger.debug(f"Could not delete message {msg_id} in chat {chat_id}: {e}")
+                logger.warning(f"Could not delete message {msg_id} in chat {chat_id}: {e}")
         context.user_data["messages_to_delete"].clear()
     
 # الأوامر الأساسية
@@ -259,7 +265,12 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
 
     # حذف رسالة الأزرار المضمنة بمجرد اختيار المستخدم
-    await context.bot.delete_message(chat_id=user_chat_id, message_id=query.message.message_id)
+    try:
+        await context.bot.delete_message(chat_id=user_chat_id, message_id=query.message.message_id)
+    except BadRequest as e:
+        logger.debug(f"Could not delete message {query.message.message_id} with inline buttons: {e}")
+    except Exception as e:
+        logger.warning(f"Error deleting inline button message: {e}")
 
     if user_choice_data == CANCEL_CB_DATA:
         await cancel_album_creation(update, context) # Use the existing cancel flow
@@ -295,11 +306,11 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
                 context.user_data["caption_status_message"] = caption_status_message
                 return await ask_for_send_location(update, context)
         else:
-            await query.message.reply_text(MESSAGES["invalid_input_choice"]) # تم تغيير المفتاح
+            await query.message.reply_text(MESSAGES["invalid_input_choice"]) 
             await cancel_album_creation(update, context) 
             return ConversationHandler.END
     else:
-        await query.message.reply_text(MESSAGES["invalid_input_choice"]) # تم تغيير المفتاح
+        await query.message.reply_text(MESSAGES["invalid_input_choice"]) 
         await cancel_album_creation(update, context) 
         return ConversationHandler.END
 
@@ -309,6 +320,7 @@ async def receive_manual_album_caption(update: Update, context: ContextTypes.DEF
     تستقبل التعليق اليدوي بعد أن اختار المستخدم زر "إدخال تعليق يدوي".
     """
     user_caption = update.message.text
+    user_chat_id = update.effective_chat.id
     
     if user_caption == '.': 
         user_caption = ""
@@ -360,7 +372,14 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     user_chat_id = query.message.chat_id
     
     await query.answer() 
-    await context.bot.delete_message(chat_id=user_chat_id, message_id=query.message.message_id) 
+    
+    # حذف رسالة الأزرار المضمنة بمجرد اختيار المستخدم
+    try:
+        await context.bot.delete_message(chat_id=user_chat_id, message_id=query.message.message_id)
+    except BadRequest as e:
+        logger.debug(f"Could not delete message {query.message.message_id} with inline buttons: {e}")
+    except Exception as e:
+        logger.warning(f"Error deleting inline button message: {e}")
 
 
     if send_location_choice_data == CANCEL_CB_DATA:
@@ -385,11 +404,12 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     elif send_location_choice_data == f"{SEND_LOC_CB_PREFIX}chat":
         send_chat_id = user_chat_id
     else:
-        await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["invalid_input_choice"]) # تم تغيير المفتاح
+        await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["invalid_input_choice"]) 
         await cancel_album_creation(update, context)
         return ConversationHandler.END
 
     # إرسال رسالة "جاري إنشاء الألبوم" وتخزين معرفها للتعديل ولحذفها لاحقاً
+    # يجب أن يتم إرسال هذه الرسالة دائمًا، لكن تحديثها فقط للألبومات الكبيرة.
     progress_msg = await context.bot.send_message(
         chat_id=user_chat_id,
         text=MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums="؟", time_remaining_str="...") ,
@@ -415,7 +435,8 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
         [KeyboardButton(MESSAGES["keyboard_clear"])]
     ]
     reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-    permanent_prompt_msg = await context.bot.send_message(
+    # لا حاجة لـ permanent_prompt_msg في temp_messages_to_clean لأنه ثابت
+    await context.bot.send_message(
         chat_id=user_chat_id,
         text=MESSAGES["success_message_permanent_prompt"], 
         reply_markup=reply_markup_main
@@ -450,6 +471,11 @@ async def clear_all_temp_messages_after_delay(bot, chat_id, delay, context_user_
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 logger.debug(f"Deleted temporary message with ID: {msg_id} after delay.")
+            except BadRequest as e: # Handle specific error for already deleted messages
+                if "Message to delete not found" in str(e):
+                    logger.debug(f"Message {msg_id} not found when trying to delete (already deleted?).")
+                else:
+                    logger.warning(f"Could not delete temporary message {msg_id} in chat {chat_id} after delay: {e}")
             except Exception as e:
                 logger.debug(f"Could not delete temporary message {msg_id} in chat {chat_id} after delay: {e}")
         context_user_data["temp_messages_to_clean"].clear()
@@ -463,12 +489,10 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     """
     chat_id = update.effective_chat.id
     
-    # حذف جميع الرسائل التي يطلب البوت حذفها فوراً (prompt, manual prompt, etc.)
     await delete_messages_from_queue(context, chat_id)
     
-    # محاولة حذف أي رسائل مؤقتة أخرى قد تكون ما زالت معلقة
-    await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data) # delay 0 for immediate clear
-    context.user_data["temp_messages_to_clean"].clear() # Ensure list is empty
+    await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data) 
+    context.user_data["temp_messages_to_clean"].clear() 
 
     context.user_data["media_queue"] = []
     context.user_data.pop("current_album_caption", None)
@@ -494,20 +518,22 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     """
     chat_id = update.effective_chat.id 
 
-    # If called from a CallbackQuery, update is a CallbackQuery object
     if update.callback_query:
         query = update.callback_query
         await query.answer() 
         chat_id = query.message.chat_id 
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=query.message.message_id)
+        except BadRequest as e: # Handle specific error for already deleted messages
+            if "Message to delete not found" in str(e):
+                logger.debug(f"Message {query.message.message_id} not found when trying to delete.")
+            else:
+                logger.warning(f"Could not delete query message in cancel_album_creation: {e}")
         except Exception as e:
-            logger.debug(f"Could not delete query message in cancel_album_creation: {e}")
+            logger.warning(f"Error deleting query message in cancel_album_creation: {e}")
             
-    # Delete all prompt messages
     await delete_messages_from_queue(context, chat_id)
     
-    # Clear any pending temporary messages (from progress, final feedback)
     await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data) 
     context.user_data["temp_messages_to_clean"].clear() 
 
@@ -516,7 +542,6 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data.pop("caption_status_message", None)
     context.user_data.pop("progress_message_id", None) 
 
-    # Use context.bot.send_message because update.message might be None if invoked from CallbackQuery
     await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["cancel_caption"],
@@ -587,46 +612,52 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
 
         logger.info(f"تم إرسال الدفعة {index + 1} إلى {target_chat_id}.")
 
-        if str(target_chat_id) == os.getenv("CHANNEL_ID") and sent_messages and index == 0:
+        # تثبيت كل رسالة من كل ألبوم إذا كان الإرسال إلى القناة
+        if str(target_chat_id) == os.getenv("CHANNEL_ID") and sent_messages: # Removed 'and index == 0'
             try:
                 await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
-                logger.info("تم تثبيت الرسالة الأولى من الألبوم في القناة.")
+                logger.info(f"تم تثبيت الرسالة الأولى من الألبوم الدفعة {index + 1} في القناة.")
             except Exception as pin_err:
-                logger.warning(f"فشل في تثبيت الرسالة في القناة: {pin_err}. يرجى التأكد من أن البوت مشرف ولديه أذن التثبيت.")
+                logger.warning(f"فشل في تثبيت الرسالة (دفعة {index + 1}) في القناة: {pin_err}. يرجى التأكد من أن البوت مشرف ولديه أذن التثبيت.")
                 if user_chat_id != target_chat_id: 
-                    await context.bot.send_message(chat_id=user_chat_id, text="⚠️ تم إرسال الألبوم للقناة ولكن تعذر تثبيت الرسالة الأولى. يرجى التأكد من أذونات البوت (نشر وتثبيت).")
+                    await context.bot.send_message(chat_id=user_chat_id, text=f"⚠️ تم إرسال الألبوم الدفعة {index+1} للقناة ولكن تعذر تثبيت الرسالة الأولى. يرجى التأكد من أذونات البوت (نشر وتثبيت).")
 
         processed_albums += 1
         
-        time_remaining_str = "جاري الحساب..."
+        # لا تُحدّث رسالة التقدم إلا إذا كان هناك أكثر من ألبوم واحد
         if total_albums > 1:
+            time_remaining_str = "جاري الحساب..."
             remaining_albums = total_albums - processed_albums
             avg_delay_per_album = (get_random_delay(min_delay=5, max_delay=30, min_diff=7) + 5)
             estimated_time_remaining = remaining_albums * avg_delay_per_album
             minutes, seconds = divmod(int(estimated_time_remaining), 60)
             time_remaining_str = f"{minutes} دقيقة و {seconds} ثانية" if minutes > 0 else f"{seconds} ثانية"
+            if processed_albums == total_albums: # Last update
+                time_remaining_str = "الآن!" 
+
+            current_progress_text = MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(
+                processed_albums=processed_albums,
+                total_albums=total_albums,
+                time_remaining_str=time_remaining_str
+            )
+
+            try:
+                if progress_message_id: 
+                    await context.bot.edit_message_text(
+                        chat_id=user_chat_id,
+                        message_id=progress_message_id,
+                        text=current_progress_text,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+            except TelegramError as e: 
+                logger.error(f"فشل في تحديث رسالة التقدم (ID: {progress_message_id}) في الدردشة {user_chat_id}: {e}")
+                context.user_data["progress_message_id"] = None 
+            except Exception as e:
+                logger.error(f"حدث خطأ غير متوقع أثناء تحديث رسالة التقدم: {e}")
         else:
-            time_remaining_str = "الآن!" 
+            # For single album, ensure progress_message_id is not edited but will be cleared
+            logger.debug("Skipping progress message update for single album.")
 
-        current_progress_text = MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(
-            processed_albums=processed_albums,
-            total_albums=total_albums,
-            time_remaining_str=time_remaining_str
-        )
-
-        try:
-            if progress_message_id: 
-                await context.bot.edit_message_text(
-                    chat_id=user_chat_id,
-                    message_id=progress_message_id,
-                    text=current_progress_text,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-        except TelegramError as e: 
-            logger.error(f"فشل في تحديث رسالة التقدم (ID: {progress_message_id}) في الدردشة {user_chat_id}: {e}")
-            context.user_data["progress_message_id"] = None 
-        except Exception as e:
-            logger.error(f"حدث خطأ غير متوقع أثناء تحديث رسالة التقدم: {e}")
 
         if index < len(chunks) - 1:
             await asyncio.sleep(get_random_delay())
@@ -680,6 +711,7 @@ def main() -> None:
             CommandHandler("settings", cancel_album_creation), 
             CommandHandler("source", cancel_album_creation),
             # هذا Fallback يلتقط أي تحديث (نص، صورة، فيديو، إلخ) لا تتطابق مع States أو Fallbacks المحددة
+            # ويؤدي إلى إلغاء نظيف (عادةً أفضل من ترك المحادثة معلقة)
             MessageHandler(filters.ALL & ~filters.COMMAND, cancel_album_creation) 
         ]
     )
