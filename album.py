@@ -393,7 +393,7 @@ async def clear_all_temp_messages_after_delay(bot, chat_id, delay, context_user_
     await asyncio.sleep(delay)
     
     if "temp_messages_to_clean" in context_user_data:
-        messages_to_delete_ids = list(context_user_data["temp_messages_to_clean"])
+        messages_to_delete_ids = list(context_user_data["temp_messages_to_clean"]) # Make a copy
         for msg_id in messages_to_delete_ids:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -403,6 +403,37 @@ async def clear_all_temp_messages_after_delay(bot, chat_id, delay, context_user_
         context_user_data["temp_messages_to_clean"].clear()
     else:
         logger.warning("temp_messages_to_clean not found in user_data during delayed deletion.")
+
+
+async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    إعادة ضبط قائمة الوسائط، ومسح جميع الرسائل المؤقتة والعودة للقائمة الرئيسية.
+    """
+    chat_id = update.effective_chat.id
+    
+    # حذف جميع الرسائل التي يطلب البوت حذفها فوراً (prompt, manual prompt, etc.)
+    await delete_messages_from_queue(context, chat_id)
+    
+    # محاولة حذف أي رسائل مؤقتة أخرى قد تكون ما زالت معلقة
+    await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data) # delay 0 for immediate clear
+    context.user_data["temp_messages_to_clean"].clear() # Ensure list is empty
+
+    context.user_data["media_queue"] = []
+    context.user_data.pop("current_album_caption", None)
+    context.user_data.pop("caption_status_message", None)
+    context.user_data.pop("progress_message_id", None) # Ensure this is also cleared
+
+    main_keyboard = [
+        [KeyboardButton(MESSAGES["keyboard_done"])],
+        [KeyboardButton(MESSAGES["keyboard_clear"])]
+    ]
+    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+    await update.message.reply_text(
+        MESSAGES["queue_cleared"],
+        reply_markup=reply_markup_main
+    )
+    return ConversationHandler.END
 
 
 async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -434,6 +465,7 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=reply_markup_main
     )
     return ConversationHandler.END
+
 
 async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE, album_caption: str, target_chat_id: int) -> None:
     """
@@ -492,7 +524,6 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
 
         logger.info(f"تم إرسال الدفعة {index + 1} إلى {target_chat_id}.")
 
-        # Check if CHANNEL_ID is set in environment and matches target_chat_id (string comparison for safety)
         if str(target_chat_id) == os.getenv("CHANNEL_ID") and sent_messages and index == 0:
             try:
                 await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
@@ -547,13 +578,10 @@ def main() -> None:
         logger.error("BOT_TOKEN not set in environment variables. Please set it.")
         return
 
-    #CHANNEL_ID should be set in your environment variables for channel posting to work.
-    # e.g., export CHANNEL_ID="-1001234567890" in your shell
     channel_id_env = os.getenv("CHANNEL_ID")
     if not channel_id_env:
         logger.warning("CHANNEL_ID environment variable is not set. Channel posting feature will not work.")
     else:
-        # Simple validation for CHANNEL_ID
         if not (channel_id_env.startswith("-100") and channel_id_env[1:].isdigit()):
             logger.error(f"Invalid CHANNEL_ID format: {channel_id_env}. It should start with '-100' followed by digits. Channel posting will not work.")
 
@@ -566,11 +594,8 @@ def main() -> None:
         ],
         states={
             ASKING_FOR_CAPTION: [
-                # إذا اختار زر "إدخال تعليق يدوي" -> اطلب التعليق ثم انتقل لـ ASKING_FOR_MANUAL_CAPTION
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['album_comment_option_manual'])}$"), handle_caption_choice),
-                # إذا اختار أي زر جاهز -> عالجه مباشرة وانتقل لـ ASKING_FOR_SEND_LOCATION
                 MessageHandler(filters.TEXT & filters.Regex(f"^{'|'.join(map(re.escape, PREDEFINED_CAPTION_BUTTONS))}$"), handle_caption_choice),
-                # أي شيء آخر في هذه الحالة (ليس زرًا) يعتبر إدخالًا غير صالح ويطلب إعادة المحاولة
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text(MESSAGES["invalid_send_location_choice"])),
             ],
             ASKING_FOR_MANUAL_CAPTION: [ # حالة جديدة لطلب التعليق اليدوي الفعلي
@@ -578,19 +603,16 @@ def main() -> None:
             ],
             ASKING_FOR_SEND_LOCATION: [
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['send_to_channel_button'])}$|^^{re.escape(MESSAGES['send_to_chat_button'])}$") & ~filters.COMMAND, handle_send_location_choice),
-                # إذا أدخل المستخدم شيئًا آخر غير الأزرار في هذه الحالة -> رسالة خطأ والبقاء في نفس الحالة
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text(MESSAGES["invalid_send_location_choice"])),
             ],
         },
         fallbacks=[
-            # هذه الـ Fallbacks تنظف وتعود للقائمة الرئيسية من أي حالة
-            MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, cancel_album_creation),
+            MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, reset_album),
             CommandHandler("cancel", cancel_album_creation),
             CommandHandler("start", cancel_album_creation), 
             CommandHandler("help", cancel_album_creation), 
             CommandHandler("settings", cancel_album_creation), 
             CommandHandler("source", cancel_album_creation),
-            # هذا Fallback الأخير يلتقط أي رسائل نصية أو غير نصية أخرى أثناء المحادثة ويؤدي إلى إلغاء نظيف
             MessageHandler(filters.ALL & ~filters.COMMAND, cancel_album_creation) 
         ]
     )
