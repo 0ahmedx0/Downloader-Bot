@@ -60,7 +60,7 @@ MESSAGES = {
     "album_caption_confirm_no_caption": "👍 حسناً! لن يكون هناك تعليق للألبوم.\n", 
     "processing_album_start": "⏳ جاري إنشاء الألبوم. قد يستغرق هذا بعض الوقت...\n\n",
     "progress_update": "جاري إرسال الألبوم: *{processed_albums}/{total_albums}*\nالوقت المتبقي المقدر: *{time_remaining_str}*.",
-    "album_creation_success": "✅ تم إنشاء جميع الألبومات بنجاح!", # رسالة النجاح ستصبح ديناميكية
+    "album_creation_success": "✅ تم إنشاء جميع الألبومات بنجاح!", 
     "album_creation_error": "❌ حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة لاحقاً.",
     "album_chunk_fail": "⚠️ فشل إرسال جزء من الألبوم ({index}/{total_albums}). سأحاول الاستمرار مع البقية.",
     "cancel_caption": "لقد ألغيت عملية إنشاء الألبوم. يمكنك البدء من جديد.",
@@ -72,7 +72,7 @@ MESSAGES = {
     "channel_id_missing": "❌ لم يتم ضبط متغير البيئة CHANNEL_ID. لا يمكن الإرسال للقناة.",
     "invalid_send_location_choice": "خيار غير صالح. الرجاء الاختيار من الأزرار.",
     "album_action_confirm": "{caption_status}أين تود إرسال الألبوم؟", 
-    "success_message_full": "✅ تم إنشاء جميع الألبومات بنجاح!\nيمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه." # الرسالة الكاملة للنجاح
+    "success_message_full": "✅ تم إنشاء جميع الألبومات بنجاح!\nيمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه."
 }
 
 # التعليقات الجاهزة كأزرار
@@ -106,7 +106,7 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
         context.user_data["messages_to_delete"] = []
     if "progress_message_id" not in context.user_data:
         context.user_data["progress_message_id"] = None
-    if "success_message_id" not in context.user_data: # لتخزين معرف رسالة النجاح
+    if "success_message_id" not in context.user_data:
         context.user_data["success_message_id"] = None
 
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -131,13 +131,14 @@ async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id
         context.user_data["progress_message_id"] = None
 
     # محاولة حذف رسالة النجاح أيضاً عند الحاجة (إذا لم يتم حذفها مسبقاً)
-    if "success_message_id" in context.user_data and context.user_data["success_message_id"] is not None:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=context.user_data["success_message_id"])
-            logger.debug(f"Deleted success message with ID: {context.user_data['success_message_id']}")
-        except Exception as e:
-            logger.debug(f"Could not delete success message {context.user_data['success_message_id']}: {e}")
-        context.user_data["success_message_id"] = None
+    # لا نقوم بحذفها هنا بعد الآن لأن دالة منفصلة ستقوم بذلك
+    # if "success_message_id" in context.user_data and context.user_data["success_message_id"] is not None:
+    #     try:
+    #         await context.bot.delete_message(chat_id=chat_id, message_id=context.user_data["success_message_id"])
+    #         logger.debug(f"Deleted success message with ID: {context.user_data['success_message_id']}")
+    #     except Exception as e:
+    #         logger.debug(f"Could not delete success message {context.user_data['success_message_id']}: {e}")
+    #     context.user_data["success_message_id"] = None
 
 # الأوامر الأساسية
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -214,9 +215,9 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
         await update.message.reply_text(MESSAGES["not_enough_media_items"])
         return ConversationHandler.END
     
-    keyboard = []
-    for caption_text in PREDEFINED_CAPTION_BUTTONS:
-        keyboard.append([KeyboardButton(caption_text)])
+    keyboard = [
+        [KeyboardButton(caption_text)] for caption_text in PREDEFINED_CAPTION_BUTTONS
+    ]
     keyboard.append([KeyboardButton(MESSAGES["album_comment_option_manual"])])
     
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -313,8 +314,8 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     user_caption = context.user_data.get("current_album_caption", "")
     user_chat_id = update.effective_chat.id
     
-    await delete_messages_from_queue(context, user_chat_id)
-    
+    await delete_messages_from_queue(context, user_chat_id) # حذف رسالة سؤال مكان الإرسال
+
     send_chat_id = None
     if send_location_choice == MESSAGES["send_to_channel_button"]:
         send_chat_id = os.getenv("CHANNEL_ID")
@@ -339,40 +340,58 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
 
     await execute_album_creation(update, context, user_caption, send_chat_id)
 
-    # بعد الانتهاء، نرسل رسالة النجاح ثم نحذفها بعد 3 ثواني
+    # بعد الانتهاء، نرسل رسالة النجاح
     success_msg = await update.message.reply_text(
         MESSAGES["success_message_full"], 
         reply_markup=ReplyKeyboardMarkup([
             [KeyboardButton(MESSAGES["keyboard_done"])],
             [KeyboardButton(MESSAGES["keyboard_clear"])]
-        ], resize_keyboard=True, one_time_keyboard=False) # نعيد لوحة المفاتيح الرئيسية هنا
+        ], resize_keyboard=True, one_time_keyboard=False)
     )
-    context.user_data["success_message_id"] = success_msg.message_id # تخزين ID رسالة النجاح
+    context.user_data["success_message_id"] = success_msg.message_id
 
-    # حذف رسائل البوت المؤقتة، بما فيها رسالة التقدم القديمة
-    await delete_messages_from_queue(context, user_chat_id)
+    # حذف رسالة التقدم القديمة فوراً
+    await delete_messages_from_queue(context, user_chat_id) # ستقوم بحذف progress_message_id وتفريغ messages_to_delete
 
-    # الانتظار 3 ثوانٍ ثم حذف رسالة النجاح
-    await asyncio.sleep(3)
-    try:
-        await context.bot.delete_message(chat_id=user_chat_id, message_id=success_msg.message_id)
-        logger.info(f"Deleted success message with ID: {success_msg.message_id} after 3 seconds.")
-    except Exception as e:
-        logger.warning(f"Could not delete success message {success_msg.message_id}: {e}")
-    finally:
-        context.user_data["success_message_id"] = None # التأكد من مسح الـ ID بعد المحاولة
+    # **التعديل هنا:** إنشاء مهمة خلفية لحذف رسالة النجاح بعد تأخير
+    context.application.create_task(
+        delete_success_message_after_delay(
+            bot=context.bot,
+            chat_id=user_chat_id,
+            message_id=success_msg.message_id,
+            delay=3,
+            context_user_data=context.user_data # تمرير جزء من context.user_data
+        )
+    )
 
     return ConversationHandler.END
+
+# دالة مساعدة لتشغيلها كمهمة خلفية
+async def delete_success_message_after_delay(bot, chat_id, message_id, delay, context_user_data):
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        logger.info(f"Deleted success message with ID: {message_id} after {delay} seconds.")
+    except Exception as e:
+        logger.warning(f"Could not delete success message {message_id} in chat {chat_id}: {e}")
+    finally:
+        # تأكد من مسح معرف رسالة النجاح من user_data بعد المحاولة
+        if "success_message_id" in context_user_data and context_user_data["success_message_id"] == message_id:
+            context_user_data["success_message_id"] = None
+
 
 async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     يلغي محادثة التعليق إذا ضغط المستخدم على Clear Album أو /cancel أثناء المطالبة.
     """
     chat_id = update.effective_chat.id
+    # delete_messages_from_queue ستكفي لمسح جميع IDs
     await delete_messages_from_queue(context, chat_id)
     context.user_data["media_queue"] = []
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
+    # لا داعي لمسح progress_message_id و success_message_id يدوياً هنا، لأن delete_messages_from_queue تقوم بذلك
+    # ولكن للتأكد، لا بأس في الإبقاء عليها.
     context.user_data.pop("progress_message_id", None)
     context.user_data.pop("success_message_id", None)
 
@@ -484,7 +503,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         if index < len(chunks) - 1:
             await asyncio.sleep(get_random_delay())
 
-    context.user_data["media_queue"] = [] # مسح قائمة الانتظار بعد الإرسال
+    context.user_data["media_queue"] = []
 
 # إعادة ضبط قائمة الوسائط
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -497,7 +516,7 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
     context.user_data.pop("progress_message_id", None)
-    context.user_data.pop("success_message_id", None) # تأكد من مسح معرف رسالة النجاح هنا أيضاً
+    context.user_data.pop("success_message_id", None)
 
     await update.message.reply_text(MESSAGES["queue_cleared"])
 
@@ -539,16 +558,14 @@ def main() -> None:
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, cancel_album_creation),
             CommandHandler("cancel", cancel_album_creation),
             CommandHandler("start", cancel_album_creation),
-            CommandHandler("help", cancel_album_creation),
-            CommandHandler("settings", cancel_album_operation_with_message_delete), # استخدم الدالة الجديدة لـ /settings و /source
-            CommandHandler("source", cancel_album_operation_with_message_delete),
+            CommandHandler("help", help_command), # هذا سيستخدم help_command الأصلي
+            CommandHandler("settings", settings_command), # هذا سيستخدم settings_command الأصلي
+            CommandHandler("source", source_command), # هذا سيستخدم source_command الأصلي
+            # للمرسلات الأخرى التي ليست أوامر ولست جزءًا من الخيارات
             MessageHandler(filters.ALL & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text("لا أستطيع فهم طلبك الآن. الرجاء الاختيار من الأزرار أو إدخال تعليق."))
         ]
     )
 
-    # هذا الأمر خاص بـ /settings و /source فقط.
-    # في الـ fallback أعلاه، استخدمنا دالة جديدة مؤقتة لمنع رسائل الأخطاء المزعجة
-    # مع الحفاظ على مسح الرسائل.
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("settings", settings_command))
@@ -563,20 +580,6 @@ def main() -> None:
 
     logger.info("Bot started polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-# دالة مساعدة للـ fallbacks التي ترسل رسائل إعلامية بدلاً من مجرد الإلغاء
-async def cancel_album_operation_with_message_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    تُستخدم كـ fallback للأوامر مثل /settings و /source داخل محادثة التعليق
-    لإنهاء المحادثة بشكل سلس مع حذف الرسائل المؤقتة.
-    """
-    await cancel_album_creation(update, context) # تقوم بالإلغاء وتنظيف الرسائل
-    # بعد التنظيف، نعيد توجيه الأمر الأصلي
-    if update.message.text == '/settings':
-        await settings_command(update, context)
-    elif update.message.text == '/source':
-        await source_command(update, context)
-    return ConversationHandler.END
 
 
 if __name__ == '__main__':
