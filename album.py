@@ -7,16 +7,15 @@ import re
 
 from telegram import (
     Update,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    InputMediaPhoto,
-    InputMediaVideo,
-    ReplyKeyboardRemove,
+    InlineKeyboardButton, # Changed to InlineKeyboardButton
+    InlineKeyboardMarkup,  # Changed to InlineKeyboardMarkup
+    ReplyKeyboardRemove,   # Still useful for final removal of ReplyKeyboard if any
 )
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler, # Added CallbackQueryHandler
     ContextTypes,
     filters,
     ConversationHandler,
@@ -32,9 +31,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # الحالات للمحادثة
-ASKING_FOR_CAPTION = 1 # لطلب اختيار التعليق (أزرار جاهزة أو يدوي)
-ASKING_FOR_MANUAL_CAPTION = 2 # لطلب إدخال التعليق اليدوي بعد اختيار زر "يدوي"
-ASKING_FOR_SEND_LOCATION = 3 # لطلب مكان الإرسال (قناة أو محادثة البوت)
+ASKING_FOR_CAPTION = 1 # لطلب اختيار التعليق
+ASKING_FOR_SEND_LOCATION = 2 # لطلب مكان الإرسال
+
+# Callbacks prefixes
+CAPTION_CB_PREFIX = "cap_"
+SEND_LOC_CB_PREFIX = "sendloc_"
+CANCEL_CB_DATA = "cancel_op" # For a cancel button in Inline Keyboard
 
 
 # الرسائل المستخدمة
@@ -51,12 +54,12 @@ MESSAGES = {
     ),
     "settings": "There are no settings to be made here",
     "source": "https://github.com/wjclub/telegram-bot-album-creator",
-    "keyboard_done": "إنشاء ألبوم",
-    "keyboard_clear": "إعادة تعيين الألبوم",
+    "keyboard_done": "إنشاء ألبوم", # This remains a ReplyKeyboard Button for entry point
+    "keyboard_clear": "إعادة تعيين الألبوم", # This remains a ReplyKeyboard Button for general use
     "not_enough_media_items": "📦 تحتاج إلى إرسال صورتين أو أكثر لتكوين ألبوم.",
     "queue_cleared": "لقد نسيت كل الصور والفيديوهات التي أرسلتها لي. لديك فرصة جديدة.",
-    "album_caption_prompt": "الرجاء اختيار تعليق للألبوم من الأزرار أدناه، أو اختر *إدخال تعليق يدوي*:",
-    "album_caption_manual_prompt": "الرجاء إدخال التعليق الذي تريده للألبوم. (سيكون هذا هو التعليق فقط لأول وسائط في كل ألبوم إذا كان هناك ألبومات متعددة).\n\nإذا كنت لا تريد أي تعليق، فقط أرسل لي نقطة `.`", 
+    "album_caption_prompt": "الرجاء اختيار تعليق للألبوم من الأزرار أدناه:",
+    "album_caption_manual_prompt_text_input": "الرجاء إدخال التعليق الذي تريده للألبوم. (سيكون هذا هو التعليق فقط لأول وسائط في كل ألبوم إذا كان هناك ألبومات متعددة).\n\nإذا كنت لا تريد أي تعليق، فقط أرسل لي نقطة `.`", # Text input is now a special case or removed.
     "album_caption_confirm": "👍 حسناً! التعليق الذي اخترته هو: `{caption}`.\n", 
     "album_caption_confirm_no_caption": "👍 حسناً! لن يكون هناك تعليق للألبوم.\n", 
     "processing_album_start": "⏳ جاري إنشاء الألبوم. قد يستغرق هذا بعض الوقت...\n\n",
@@ -65,19 +68,22 @@ MESSAGES = {
     "album_creation_error": "❌ حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة لاحقاً.",
     "album_chunk_fail": "⚠️ فشل إرسال جزء من الألبوم ({index}/{total_albums}). سأحاول الاستمرار مع البقية.",
     "cancel_caption": "لقد ألغيت عملية إنشاء الألبوم. يمكنك البدء من جديد.",
-    "album_comment_option_manual": "إدخال تعليق يدوي",
-    # رسائل مكان الإرسال
+    "album_comment_option_manual": "إدخال تعليق يدوي (نص)", # This option is now purely a textual prompt to use if desired.
     "ask_send_location": "أين تود إرسال الألبوم؟",
     "send_to_channel_button": "القناة 📢",
     "send_to_chat_button": "المحادثة معي 👤",
     "channel_id_missing": "❌ لم يتم ضبط معرف القناة (CHANNEL_ID) في بيئة البوت. لا يمكن الإرسال للقناة. الرجاء الاتصال بالمطور.",
-    "invalid_send_location_choice": "خيار غير صالح. الرجاء الاختيار من الأزرار.",
-    "album_action_confirm": "{caption_status}{ask_location_prompt}", # Combine caption status and location prompt
-    "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه." # الرسالة الجديدة الدائمة
+    "invalid_callback_data": "بيانات زر غير صالحة. الرجاء المحاولة مرة أخرى أو البدء من جديد.",
+    "album_action_confirm": "{caption_status}{ask_location_prompt}", 
+    "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه.",
+    "caption_cancelled_by_inline_btn": "تم إلغاء عملية اختيار التعليق." # New message for inline cancel
 }
 
-# التعليقات الجاهزة كأزرار
-PREDEFINED_CAPTION_BUTTONS = [
+# التعليقات الجاهزة كأزرار (مفتاح-قيمة: النص الظاهر للزر - قيمة الـ Callback Data)
+# لإعادة استخدام التعليق نفسه كنص للـ callback_data، سنقوم بتعديله ليكون صالحاً للـ URL.
+# ولكن الأفضل هو استخدام مؤشر أو رقم للـ Callback Data لتجنب مشاكل الطول أو الأحرف الخاصة.
+# سأستخدم index لتكون قصيرة ونظيفة.
+PREDEFINED_CAPTION_OPTIONS = [
     "عرض ورعان اجانب 🌈💋",
     "🌈 🔥 .",
     "حصريات منوع🌈🔥.",
@@ -89,8 +95,9 @@ PREDEFINED_CAPTION_BUTTONS = [
     "منوعات 🌈🔥.",
     "حصريات عربي 🌈🔥.",
     "حصريات اجنبي 🌈🔥.",
+    # الآن التعليق اليدوي هو مجرد خيار يُختاره المستخدم ليخبر البوت أنه يريد كتابة النص
+    "لا يوجد تعليق", # New option for no caption explicitly
 ]
-
 
 # دالة التأخير العشوائي
 prev_delay = None
@@ -105,16 +112,14 @@ def get_random_delay(min_delay=5, max_delay=30, min_diff=7):
 
 # تهيئة بيانات المستخدم
 async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
-    """يضمن تهيئة context.user_data وقائمة الوسائط."""
     if "media_queue" not in context.user_data:
         context.user_data["media_queue"] = []
-    if "messages_to_delete" not in context.user_data: # Messages that must be deleted promptly
+    if "messages_to_delete" not in context.user_data:
         context.user_data["messages_to_delete"] = []
-    if "temp_messages_to_clean" not in context.user_data: # Messages that can be deleted after a delay
+    if "temp_messages_to_clean" not in context.user_data:
         context.user_data["temp_messages_to_clean"] = []
-    if "progress_message_id" not in context.user_data: # Specific ID for the progress message
+    if "progress_message_id" not in context.user_data:
         context.user_data["progress_message_id"] = None
-
 
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """يحذف جميع الرسائل المخزنة في قائمة messages_to_delete."""
@@ -128,19 +133,18 @@ async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id
                 logger.debug(f"Could not delete message {msg_id} in chat {chat_id}: {e}")
         context.user_data["messages_to_delete"].clear()
     
-    # رسالة التقدم يتم إدارتها بشكل منفصل في نهاية execute_album_creation 
-    # وفي وظيفة clear_all_temp_messages_after_delay
 
 # الأوامر الأساسية
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await initialize_user_data(context)
     username = update.effective_user.username or "human"
     message = MESSAGES["greeting"].format(username=username)
-    keyboard = [
+    # استخدام ReplyKeyboardMarkup للأزرار الرئيسية
+    reply_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
         [KeyboardButton(MESSAGES["keyboard_clear"])]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
     await update.message.reply_text(message, reply_markup=reply_markup)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -177,7 +181,6 @@ async def send_media_group_with_backoff(context: ContextTypes.DEFAULT_TYPE, chat
         except RetryAfter as e:
             logger.warning("RetryAfter: chunk %d, attempt %d. Waiting for %s seconds.",
                            chunk_index + 1, attempt + 1, e.retry_after)
-            # إرسال رسالة تنبيه للمستخدم في دردشته الخاصة (إذا لم يكن هو المستلم)
             if chat_id_to_send_to != user_chat_id: 
                 await context.bot.send_message(chat_id=user_chat_id, text=f"⚠️ تجاوزت حد رسائل تليجرام للقناة. سأنتظر {e.retry_after} ثانية قبل إعادة المحاولة.")
             else:
@@ -204,14 +207,13 @@ async def send_media_group_with_backoff(context: ContextTypes.DEFAULT_TYPE, chat
 
 async def start_album_creation_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    الخطوة الأولى في محادثة إنشاء الألبوم: تطلب من المستخدم اختيار أو إدخال التعليق.
+    الخطوة الأولى: تطلب من المستخدم اختيار تعليق الألبوم باستخدام Inline Buttons.
     """
     await initialize_user_data(context)
     user_chat_id = update.effective_chat.id
     
-    # حذف كل الرسائل المؤقتة من التفاعل السابق فوراً عند بدء عملية جديدة
+    # حذف كل الرسائل المؤقتة من التفاعل السابق عند بدء عملية جديدة
     await delete_messages_from_queue(context, user_chat_id)
-    # Clear temp_messages_to_clean from any previous incomplete interactions
     context.user_data["temp_messages_to_clean"].clear()
 
 
@@ -222,127 +224,185 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
         await update.message.reply_text(MESSAGES["not_enough_media_items"])
         return ConversationHandler.END
     
-    keyboard = [[KeyboardButton(caption_text)] for caption_text in PREDEFINED_CAPTION_BUTTONS]
-    keyboard.append([KeyboardButton(MESSAGES["album_comment_option_manual"])])
+    # بناء InlineKeyboard لأزرار التعليقات
+    inline_keyboard_buttons = []
+    for i, caption_text in enumerate(PREDEFINED_CAPTION_OPTIONS):
+        inline_keyboard_buttons.append([InlineKeyboardButton(caption_text, callback_data=f"{CAPTION_CB_PREFIX}{i}")])
     
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    # زر إلغاء للوحة المفاتيح المضمنة
+    inline_keyboard_buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)])
+
+
+    inline_markup = InlineKeyboardMarkup(inline_keyboard_buttons)
     
     prompt_msg = await update.message.reply_text(
         MESSAGES["album_caption_prompt"],
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=reply_markup
+        reply_markup=inline_markup
     )
-    context.user_data["messages_to_delete"].append(prompt_msg.message_id) # Add to queue for prompt deletion
-    
+    context.user_data["messages_to_delete"].append(prompt_msg.message_id) # هذا يتم حذفه بعد استجابة المستخدم
+
     return ASKING_FOR_CAPTION
 
 async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    تستقبل اختيار التعليق من الأزرار أو إشارة لإدخال تعليق يدوي.
+    تستقبل اختيار التعليق من Inline Buttons.
     """
-    user_choice = update.message.text
+    query = update.callback_query
+    user_choice_data = query.data
+    user_chat_id = query.message.chat_id
     
-    if user_choice == MESSAGES["album_comment_option_manual"]:
-        # إذا اختار المستخدم "إدخال تعليق يدوي"
-        manual_prompt_msg = await update.message.reply_text(
-            MESSAGES["album_caption_manual_prompt"],
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=ReplyKeyboardRemove() # إزالة لوحة المفاتيح المخصصة هنا
-        )
-        context.user_data["messages_to_delete"].append(manual_prompt_msg.message_id)
-        return ASKING_FOR_MANUAL_CAPTION # ننتقل إلى حالة طلب التعليق اليدوي
-    elif user_choice in PREDEFINED_CAPTION_BUTTONS:
-        # إذا اختار المستخدم تعليقًا جاهزًا
-        context.user_data["current_album_caption"] = user_choice
-        caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_choice)
-        context.user_data["caption_status_message"] = caption_status_message
-        return await ask_for_send_location(update, context)
+    # تأكيد الاستجابة على الـ callback_query لمنع ظهور أيقونة التحميل
+    await query.answer()
+
+    # حذف رسالة الأزرار المضمنة بمجرد اختيار المستخدم
+    await context.bot.delete_message(chat_id=user_chat_id, message_id=query.message.message_id)
+
+    if user_choice_data == CANCEL_CB_DATA:
+        await cancel_album_creation(update, context) # Use the existing cancel flow
+        return ConversationHandler.END
+    
+    if user_choice_data.startswith(CAPTION_CB_PREFIX):
+        caption_index = int(user_choice_data.replace(CAPTION_CB_PREFIX, ""))
+        
+        if 0 <= caption_index < len(PREDEFINED_CAPTION_OPTIONS):
+            user_caption = PREDEFINED_CAPTION_OPTIONS[caption_index]
+            if user_caption == "لا يوجد تعليق": # Handle the "No caption" case
+                user_caption = ""
+            
+            context.user_data["current_album_caption"] = user_caption
+            caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_caption) if user_caption else MESSAGES["album_caption_confirm_no_caption"]
+            context.user_data["caption_status_message"] = caption_status_message
+            
+            return await ask_for_send_location(update, context)
+        else:
+            await query.message.reply_text(MESSAGES["invalid_callback_data"])
+            await cancel_album_creation(update, context) # Revert to main state
+            return ConversationHandler.END
     else:
-        await update.message.reply_text(MESSAGES["invalid_send_location_choice"]) # رسالة خطأ للخيار غير الصالح
-        return ASKING_FOR_CAPTION # البقاء في نفس الحالة لإعادة المحاولة
+        await query.message.reply_text(MESSAGES["invalid_callback_data"])
+        await cancel_album_creation(update, context) # Revert to main state
+        return ConversationHandler.END
 
 
-async def receive_manual_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    تستقبل التعليق اليدوي بعد أن اختار المستخدم زر "إدخال تعليق يدوي".
-    """
-    user_caption = update.message.text
-    
-    if user_caption == '.': # If user enters a period, no caption
-        user_caption = ""
+# No more receive_manual_album_caption if direct text input is removed after this.
+# If you still want text input after a button "Manual caption", then ASK_FOR_MANUAL_CAPTION is still needed.
+# For now, I'm removing the text input path by assuming users will use only predefined options.
+# If "إدخال تعليق يدوي (نص)" is desired as a button, it means the next message is a text input,
+# and we would keep ASKING_FOR_MANUAL_CAPTION. Let's keep "إدخال تعليق يدوي (نص)"
+# as a normal REPLY button on the start. So this handler for ASKING_FOR_CAPTION is only for INLINE BUTTONS.
 
-    context.user_data["current_album_caption"] = user_caption
-    caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_caption) if user_caption else MESSAGES["album_caption_confirm_no_caption"]
-    context.user_data["caption_status_message"] = caption_status_message
+# For manual text input, the start button for "إنشاء ألبوم" will lead to a Reply Keyboard asking for text
+# input as a special "manual" option button. This is where your previous `handle_caption_choice` logic comes from.
+# The user clicked an Inline button so handle_caption_choice MUST be a CallbackQueryHandler
+# The decision now is: are ALL caption selections Inline? Or some are Inline and some are Reply?
+# The request stated "اريد استخدام تلك الازرار حتى وان حذفنا امكانيه اضافه تعليق من قبل المستخدم" (referring to Inline buttons)
 
-    # بعد استلام التعليق اليدوي، ننتقل لخطوة اختيار مكان الإرسال
-    return await ask_for_send_location(update, context)
+# To remove "إدخال تعليق يدوي" but keep the ability for user to type directly as fallback,
+# it requires a complex flow with `filters.TEXT` and `filters.COMMAND`.
+
+# My current understanding for *this* round of changes:
+# 1. Start is still `ReplyKeyboard`
+# 2. Caption selection is fully `InlineKeyboard`
+# 3. No direct "text input" option is provided by a button; if they want text they send it instead of a photo/video (or you re-enable "إدخال تعليق يدوي (نص)" as a ReplyButton)
+
+# If the "إدخال تعليق يدوي" *inline* option should exist, and lead to asking for a text input,
+# ASKING_FOR_MANUAL_CAPTION state needs to be reused and its entry handler will be from here.
+
+# Let's adjust, keeping only INLINE for captions and assuming "إدخال تعليق يدوي (نص)" will not exist as a button.
+# "لا يوجد تعليق" inline button will serve the purpose of empty caption.
+
+# If you really need "إدخال تعليق يدوي" as an inline button, it would behave like:
+# Inline Button: "ادخل تعليق يدوي" -> Transition to ASKING_FOR_MANUAL_CAPTION
+# ASKING_FOR_MANUAL_CAPTION: expects text from user, stores it, then goes to ASKING_FOR_SEND_LOCATION
+
+# FOR THIS REVISION, I will make all captions INLINE buttons and REMOVE the manual text input flow
+# provided by a button (i.e. no `ASKING_FOR_MANUAL_CAPTION` state).
+# The "لا يوجد تعليق" will be an INLINE button for an empty caption.
+
+# IF you want manual text input option through a button, the ConversationHandler logic gets complex
+# mixing MessageHandlers and CallbackQueryHandlers within a state, OR you revert "manual text input"
+# back to ReplyKeyboard (as it was) for the Caption step while keeping others as Inline.
+
+# Let's assume you want all interaction WITHIN the flow to be Inline.
 
 
 async def ask_for_send_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    تطلب من المستخدم اختيار مكان إرسال الألبوم.
+    تطلب من المستخدم اختيار مكان إرسال الألبوم باستخدام Inline Buttons.
     """
-    user_chat_id = update.effective_chat.id
-    # حذف كل الرسائل المعلقة للحذف في القائمة messages_to_delete
-    await delete_messages_from_queue(context, user_chat_id) 
+    # Note: query is not passed to this function directly if called from handle_caption_choice
+    # so we rely on `update.message.chat_id` or similar if called from other handlers.
+    # In CallbackQueryHandler, query.message refers to the message *with the inline keyboard*.
+    # So using update.callback_query.message.chat_id if called from callback, or update.message.chat_id otherwise.
+    user_chat_id = update.effective_chat.id # Use effective_chat for robustness
 
+    # If called from a CallbackQueryHandler, original message with buttons needs to be deleted/edited
+    # We should have already deleted the previous message containing inline buttons in `handle_caption_choice`.
 
-    keyboard = [
-        [KeyboardButton(MESSAGES["send_to_channel_button"])],
-        [KeyboardButton(MESSAGES["send_to_chat_button"])]
+    inline_keyboard_buttons = [
+        [InlineKeyboardButton(MESSAGES["send_to_channel_button"], callback_data=f"{SEND_LOC_CB_PREFIX}channel")],
+        [InlineKeyboardButton(MESSAGES["send_to_chat_button"], callback_data=f"{SEND_LOC_CB_PREFIX}chat")]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+    inline_keyboard_buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)])
+    
+    inline_markup = InlineKeyboardMarkup(inline_keyboard_buttons)
     
     caption_status = context.user_data.get("caption_status_message", "")
     message_text = MESSAGES["album_action_confirm"].format(caption_status=caption_status, ask_location_prompt=MESSAGES["ask_send_location"])
 
-    prompt_msg = await update.message.reply_text(
+    prompt_msg = await update.effective_chat.send_message( # Use send_message for new message with inline keyboard
         message_text,
-        reply_markup=reply_markup,
+        reply_markup=inline_markup,
         parse_mode=ParseMode.MARKDOWN
     )
-    context.user_data["messages_to_delete"].append(prompt_msg.message_id) # يتم حذف هذه الرسالة بواسطة delete_messages_from_queue في الخطوة التالية
+    context.user_data["messages_to_delete"].append(prompt_msg.message_id) 
     
     return ASKING_FOR_SEND_LOCATION
 
 async def handle_send_location_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    تستقبل اختيار المستخدم لمكان إرسال الألبوم وتنفذه.
+    تستقبل اختيار المستخدم لمكان إرسال الألبوم من Inline Buttons وتنفذه.
     """
-    send_location_choice = update.message.text
+    query = update.callback_query
+    send_location_choice_data = query.data
     user_caption = context.user_data.get("current_album_caption", "")
-    user_chat_id = update.effective_chat.id
+    user_chat_id = query.message.chat_id
     
-    # حذف كل رسائل المطالبة بالأزرار وما شابهها
-    await delete_messages_from_queue(context, user_chat_id) 
+    await query.answer() # Acknowledge callback query
+    await context.bot.delete_message(chat_id=user_chat_id, message_id=query.message.message_id) # Delete the message with buttons
+
+
+    if send_location_choice_data == CANCEL_CB_DATA:
+        await cancel_album_creation(update, context) # Use the existing cancel flow
+        return ConversationHandler.END
+
 
     send_chat_id = None
-    if send_location_choice == MESSAGES["send_to_channel_button"]:
-        send_chat_id_env = os.getenv("CHANNEL_ID") # Get as string
+    if send_location_choice_data == f"{SEND_LOC_CB_PREFIX}channel":
+        send_chat_id_env = os.getenv("CHANNEL_ID")
         if not send_chat_id_env:
-            error_msg = await update.message.reply_text(MESSAGES["channel_id_missing"])
+            error_msg = await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["channel_id_missing"])
             context.user_data["messages_to_delete"].append(error_msg.message_id)
-            return ASKING_FOR_SEND_LOCATION # Stay in same state for re-prompt
+            return await ask_for_send_location(update, context) # Stay in same state for re-prompt with new inline buttons
         try: 
-            send_chat_id = int(send_chat_id_env) # Convert to int for Telegram API
+            send_chat_id = int(send_chat_id_env)
         except ValueError:
-            error_msg = await update.message.reply_text("❌ معرف القناة (CHANNEL_ID) في إعدادات البوت ليس رقماً صحيحاً.")
+            error_msg = await context.bot.send_message(chat_id=user_chat_id, text="❌ معرف القناة (CHANNEL_ID) في إعدادات البوت ليس رقماً صحيحاً.")
             context.user_data["messages_to_delete"].append(error_msg.message_id)
-            return ASKING_FOR_SEND_LOCATION
-
-    elif send_location_choice == MESSAGES["send_to_chat_button"]:
+            return await ask_for_send_location(update, context)
+    elif send_location_choice_data == f"{SEND_LOC_CB_PREFIX}chat":
         send_chat_id = user_chat_id
     else:
-        error_msg = await update.message.reply_text(MESSAGES["invalid_send_location_choice"])
-        context.user_data["messages_to_delete"].append(error_msg.message_id)
-        return ASKING_FOR_SEND_LOCATION
+        await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["invalid_callback_data"])
+        await cancel_album_creation(update, context)
+        return ConversationHandler.END
 
-    # إرسال رسالة "جاري إنشاء الألبوم" وتخزين معرفها للتعديل ولحذفها لاحقاً
-    progress_msg = await update.message.reply_text(
-        MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums="؟", time_remaining_str="...") ,
+    # إرسال رسالة "جاري إنشاء الألبوم" وتخزين معرفها
+    progress_msg = await context.bot.send_message(
+        chat_id=user_chat_id,
+        text=MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums="؟", time_remaining_str="...") ,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardRemove() 
     )
     context.user_data["progress_message_id"] = progress_msg.message_id # Save specific ID for editing/later deletion
     context.user_data["temp_messages_to_clean"].append(progress_msg.message_id) # Also add to cleanup list
@@ -351,21 +411,22 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     await execute_album_creation(update, context, user_caption, send_chat_id)
 
     # بعد الانتهاء من execute_album_creation
-    final_feedback_msg = await update.message.reply_text(
-        MESSAGES["album_creation_success"], 
-        reply_markup=ReplyKeyboardRemove() 
+    final_feedback_msg = await context.bot.send_message(
+        chat_id=user_chat_id,
+        text=MESSAGES["album_creation_success"], 
     )
     context.user_data["temp_messages_to_clean"].append(final_feedback_msg.message_id) # Add final feedback to cleanup list
 
 
-    # إرسال لوحة المفاتيح الرئيسية الدائمة
+    # إرسال لوحة المفاتيح الرئيسية الدائمة (ReplyKeyboardMarkup)
     main_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
         [KeyboardButton(MESSAGES["keyboard_clear"])]
     ]
     reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-    permanent_prompt_msg = await update.message.reply_text(
-        MESSAGES["success_message_permanent_prompt"], 
+    permanent_prompt_msg = await context.bot.send_message(
+        chat_id=user_chat_id,
+        text=MESSAGES["success_message_permanent_prompt"], 
         reply_markup=reply_markup_main
     )
 
@@ -382,7 +443,7 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     # مسح البيانات ذات الصلة بمسار الألبوم الحالي من user_data
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
-    context.user_data.pop("progress_message_id", None) # Clear as it's now handled by temp_messages_to_clean
+    context.user_data.pop("progress_message_id", None) 
 
     return ConversationHandler.END
 
@@ -440,14 +501,26 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     """
     يلغي محادثة التعليق ويعيد لوحة المفاتيح الرئيسية.
     """
-    chat_id = update.effective_chat.id
-    
-    # حذف جميع الرسائل التي يطلب البوت حذفها فوراً (prompt, manual prompt, etc.)
+    chat_id = update.effective_chat.id # Use update.effective_chat.id if called from ReplyKeyboard Button
+
+    # If called from a CallbackQuery, update is a CallbackQuery object
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer() # Acknowledge the query
+        chat_id = query.message.chat_id # Get chat_id from query.message
+        # Attempt to delete the message that contained the inline keyboard
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=query.message.message_id)
+        except Exception as e:
+            logger.debug(f"Could not delete query message in cancel_album_creation: {e}")
+
+    # Delete all prompt messages
     await delete_messages_from_queue(context, chat_id)
     
-    # محاولة حذف أي رسائل مؤقتة أخرى قد تكون ما زالت معلقة
+    # Clear any pending temporary messages (from progress, final feedback)
     await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data) # delay 0 for immediate clear
     context.user_data["temp_messages_to_clean"].clear() # Ensure list is empty
+
 
     context.user_data["media_queue"] = []
     context.user_data.pop("current_album_caption", None)
@@ -460,8 +533,9 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
 
-    await update.message.reply_text(
-        MESSAGES["cancel_caption"],
+    await context.bot.send_message( # Use send_message as the original message might be deleted
+        chat_id=chat_id,
+        text=MESSAGES["cancel_caption"],
         reply_markup=reply_markup_main
     )
     return ConversationHandler.END
@@ -473,7 +547,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     """
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
-    user_chat_id = update.effective_chat.id 
+    user_chat_id = update.effective_chat.id # دردشة المستخدم لإرسال التحديثات له
 
     logger.info("بدء تحويل الألبوم. عدد الوسائط: %d. الهدف: %s", total_media, target_chat_id)
 
@@ -594,25 +668,27 @@ def main() -> None:
         ],
         states={
             ASKING_FOR_CAPTION: [
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['album_comment_option_manual'])}$"), handle_caption_choice),
-                MessageHandler(filters.TEXT & filters.Regex(f"^{'|'.join(map(re.escape, PREDEFINED_CAPTION_BUTTONS))}$"), handle_caption_choice),
+                CallbackQueryHandler(handle_caption_choice, pattern=f"^{CAPTION_CB_PREFIX}|^({CANCEL_CB_DATA})$"), # Expect Inline Button callback
+                # أي رسائل نصية هنا (إذا أرسلها المستخدم بالخطأ) ستؤدي لرسالة خطأ
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text(MESSAGES["invalid_send_location_choice"])),
             ],
-            ASKING_FOR_MANUAL_CAPTION: [ # حالة جديدة لطلب التعليق اليدوي الفعلي
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption),
-            ],
+            # ASK_FOR_MANUAL_CAPTION is removed from this Inline-only flow (within conversation)
             ASKING_FOR_SEND_LOCATION: [
-                MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['send_to_channel_button'])}$|^^{re.escape(MESSAGES['send_to_chat_button'])}$") & ~filters.COMMAND, handle_send_location_choice),
+                CallbackQueryHandler(handle_send_location_choice, pattern=f"^{SEND_LOC_CB_PREFIX}|^({CANCEL_CB_DATA})$"), # Expect Inline Button callback
+                # أي رسائل نصية هنا ستؤدي لرسالة خطأ
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text(MESSAGES["invalid_send_location_choice"])),
             ],
         },
         fallbacks=[
+            # Note: For fallbacks initiated by a CallbackQuery, you often need to get chat_id from query.message
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, reset_album),
-            CommandHandler("cancel", cancel_album_creation),
+            CommandHandler("cancel", cancel_album_creation), # Handle /cancel for direct commands
             CommandHandler("start", cancel_album_creation), 
             CommandHandler("help", cancel_album_creation), 
             CommandHandler("settings", cancel_album_creation), 
             CommandHandler("source", cancel_album_creation),
+            # This last fallback catches any non-callback_query text or media during a conversation
+            # and triggers cancel. This is good for robustness.
             MessageHandler(filters.ALL & ~filters.COMMAND, cancel_album_creation) 
         ]
     )
