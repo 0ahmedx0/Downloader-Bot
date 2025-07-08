@@ -12,7 +12,8 @@ from telegram import (
     ReplyKeyboardRemove,
     InputMediaPhoto,
     InputMediaVideo,
-    KeyboardButton, # <--- تم إعادة الاستيراد هنا
+    KeyboardButton,
+    ReplyKeyboardMarkup, # <--- تأكد من وجود هذا الاستيراد هنا
 )
 from telegram.ext import (
     Application,
@@ -23,7 +24,7 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
-from telegram.error import RetryAfter, TelegramError, BadRequest # Added BadRequest
+from telegram.error import RetryAfter, TelegramError, BadRequest 
 from telegram.constants import ParseMode
 
 
@@ -134,7 +135,7 @@ async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 logger.debug(f"Deleted message with ID: {msg_id} in chat {chat_id} (from messages_to_delete).")
-            except BadRequest as e: # Handle 400 Bad Request specifically for delete operations
+            except BadRequest as e: 
                 if "Message to delete not found" in str(e):
                     logger.debug(f"Message {msg_id} not found when trying to delete (already deleted?).")
                 else:
@@ -435,8 +436,7 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
         [KeyboardButton(MESSAGES["keyboard_clear"])]
     ]
     reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-    # لا حاجة لـ permanent_prompt_msg في temp_messages_to_clean لأنه ثابت
-    await context.bot.send_message(
+    permanent_prompt_msg = await context.bot.send_message(
         chat_id=user_chat_id,
         text=MESSAGES["success_message_permanent_prompt"], 
         reply_markup=reply_markup_main
@@ -471,7 +471,7 @@ async def clear_all_temp_messages_after_delay(bot, chat_id, delay, context_user_
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 logger.debug(f"Deleted temporary message with ID: {msg_id} after delay.")
-            except BadRequest as e: # Handle specific error for already deleted messages
+            except BadRequest as e: 
                 if "Message to delete not found" in str(e):
                     logger.debug(f"Message {msg_id} not found when trying to delete (already deleted?).")
                 else:
@@ -524,7 +524,7 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
         chat_id = query.message.chat_id 
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=query.message.message_id)
-        except BadRequest as e: # Handle specific error for already deleted messages
+        except BadRequest as e: 
             if "Message to delete not found" in str(e):
                 logger.debug(f"Message {query.message.message_id} not found when trying to delete.")
             else:
@@ -612,7 +612,6 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
 
         logger.info(f"تم إرسال الدفعة {index + 1} إلى {target_chat_id}.")
 
-        # تثبيت كل رسالة من كل ألبوم إذا كان الإرسال إلى القناة
         if str(target_chat_id) == os.getenv("CHANNEL_ID") and sent_messages: # Removed 'and index == 0'
             try:
                 await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
