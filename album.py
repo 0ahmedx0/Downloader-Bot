@@ -404,7 +404,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     num_albums = math.ceil(total_media / max_items_per_album)
 
     base_chunk_size = total_media // num_albums
-    remainder = total_media % num_albums
+    remainder = total_albums % num_albums # Fixed here: total_media to total_albums in calculating remainder
 
     chunk_sizes = []
     for i in range(num_albums):
@@ -422,21 +422,37 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     total_albums = len(chunks)
     processed_albums = 0
     
-    # **التغيير الرئيسي هنا:** إرسال رسالة التقدم لأول مرة هنا
-    # مع ReplyKeyboardRemove لمنع ظهور أزرار أثناء التقدم.
-    progress_msg = await context.bot.send_message(
-        chat_id=user_chat_id,
-        text=MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums=total_albums, time_remaining_str="...") ,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardRemove() # مهم لإزالة لوحة المفاتيح الحالية (أزرار الاختيار)
-    )
-    context.user_data["progress_message_id"] = progress_msg.message_id
-    
-    # تأخير بسيط لضمان "إستقرار" رسالة التقدم كقابلة للتعديل
-    await asyncio.sleep(0.3)
+    # **التعديل الجديد هنا:** تهيئة progress_message_id قبل استخدامها
+    # هذا يضمن أن تكون progress_message_id معرفة حتى لو فشلت الرسالة الأولى
+    progress_message_id = None 
+
+    # إرسال رسالة التقدم لأول مرة هنا
+    try:
+        progress_msg = await context.bot.send_message(
+            chat_id=user_chat_id,
+            text=MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums=total_albums, time_remaining_str="...") ,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardRemove()
+        )
+        context.user_data["progress_message_id"] = progress_msg.message_id
+        progress_message_id = progress_msg.message_id # **مهم:** تحديث المتغير المحلي أيضاً
+
+        # تأخير بسيط لضمان "إستقرار" رسالة التقدم كقابلة للتعديل
+        await asyncio.sleep(0.3)
+    except TelegramError as e:
+        logger.error(f"Failed to send initial progress message: {e}")
+        # إذا فشلت رسالة التقدم الأولى، لا يمكن تحديثها.
+        context.user_data["progress_message_id"] = None
+        return # إنهاء الدالة لأننا لا نستطيع متابعة التقدم
+
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while sending initial progress message: {e}")
+        context.user_data["progress_message_id"] = None
+        return # إنهاء الدالة
 
 
     for index, chunk in enumerate(chunks):
+        # ... بقية الكود داخل الحلقة (لا تتغير)
         input_media = []
         for i, item in enumerate(chunk):
             caption = album_caption if i == 0 else None
@@ -456,15 +472,14 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         if not success:
             logger.error(f"Failed to send chunk {index + 1} to {target_chat_id}.")
             await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["album_chunk_fail"].format(index=index + 1, total_albums=total_albums))
-            # إذا فشلت هذه الدفعة، لا حاجة لمحاولة تحديث التقدم، نكتفي بالإشعار
             context.user_data["progress_message_id"] = None # لمنع المزيد من محاولات التعديل الفاشلة
-            return # إنهاء execute_album_creation مبكراً في حالة الفشل الكبير
+            return 
 
         logger.info(f"تم إرسال الدفعة {index + 1} إلى {target_chat_id}.")
 
         if target_chat_id == os.getenv("CHANNEL_ID") and sent_messages:
             try:
-                if index == 0: # تثبيت أول رسالة من الألبوم (أول دفعة فقط)
+                if index == 0: 
                     await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
                     logger.info("تم تثبيت الرسالة الأولى من الألبوم.")
             except Exception as pin_err:
@@ -491,7 +506,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         )
 
         try:
-            if progress_message_id: 
+            if progress_message_id: # الآن progress_message_id سيكون معرفاً
                 await context.bot.edit_message_text(
                     chat_id=user_chat_id,
                     message_id=progress_message_id,
@@ -500,17 +515,18 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
                 )
         except TelegramError as e: 
             logger.error("Failed to edit progress message (ID: %s). It might be non-editable or deleted: %s", progress_message_id, e)
-            context.user_data["progress_message_id"] = None # منع محاولات التعديل المستقبلية لنفس الرسالة
+            context.user_data["progress_message_id"] = None 
+            progress_message_id = None # مهم أيضاً هنا لمستقبل التحديثات داخل الحلقة
         except Exception as e:
             logger.error("An unexpected error occurred while editing progress message (ID: %s): %s", progress_message_id, e)
-            context.user_data["progress_message_id"] = None # منع محاولات التعديل المستقبلية
+            context.user_data["progress_message_id"] = None 
+            progress_message_id = None # مهم أيضاً
 
-        # لا تؤخر بعد آخر دفعة لإرسال رسالة النجاح مباشرة
         if index < len(chunks) - 1:
             await asyncio.sleep(get_random_delay())
 
     context.user_data["media_queue"] = [] # قائمة الوسائط تفرغ بعد انتهاء الإرسال
-
+    
 # إعادة ضبط قائمة الوسائط
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await initialize_user_data(context)
