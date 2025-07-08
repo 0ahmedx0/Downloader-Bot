@@ -26,14 +26,15 @@ from telegram.constants import ParseMode
 
 
 # إعداد التسجيل
+# إعداد التسجيل
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO # تم تصحيح علامات الاقتباس هنا
 )
 logger = logging.getLogger(__name__)
 
 # الحالات للمحادثة
 ASKING_FOR_CAPTION = 1
-ASKING_FOR_MANUAL_CAPTION = 2 
+# ASKING_FOR_MANUAL_CAPTION = 2 # لم تعد هناك حاجة لهذه الحالة بشكل منفصل
 ASKING_FOR_SEND_LOCATION = 3 
 
 # الرسائل المستخدمة
@@ -55,7 +56,7 @@ MESSAGES = {
     "not_enough_media_items": "📦 تحتاج إلى إرسال صورتين أو أكثر لتكوين ألبوم.",
     "queue_cleared": "لقد نسيت كل الصور والفيديوهات التي أرسلتها لي. لديك فرصة جديدة.",
     "album_caption_prompt": "الرجاء اختيار تعليق للألبوم من الأزرار أدناه، أو اختر *إدخال تعليق يدوي*:",
-    "album_caption_manual_prompt": "الرجاء إدخال التعليق الذي تريده للألبوم. (سيكون هذا هو التعليق فقط لأول وسائط في كل ألبوم إذا كان هناك ألبومات متعددة).\n\nإذا كنت لا تريد أي تعليق، فقط أرسل لي نقطة `.`",
+    # "album_caption_manual_prompt": "الرجاء إدخال التعليق الذي تريده للألبوم. (سيكون هذا هو التعليق فقط لأول وسائط في كل ألبوم إذا كان هناك ألبومات متعددة).\n\nإذا كنت لا تريد أي تعليق، فقط أرسل لي نقطة `.`", # يمكن دمجها أو استخدامها كنص للرسالة فقط
     "album_caption_confirm": "👍 حسناً! التعليق الذي اخترته هو: `{caption}`.\n", 
     "album_caption_confirm_no_caption": "👍 حسناً! لن يكون هناك تعليق للألبوم.\n", 
     "processing_album_start": "⏳ جاري إنشاء الألبوم. قد يستغرق هذا بعض الوقت...\n\n",
@@ -72,7 +73,7 @@ MESSAGES = {
     "channel_id_missing": "❌ لم يتم ضبط متغير البيئة CHANNEL_ID. لا يمكن الإرسال للقناة.",
     "invalid_send_location_choice": "خيار غير صالح. الرجاء الاختيار من الأزرار.",
     "album_action_confirm": "{caption_status}أين تود إرسال الألبوم؟", 
-    "success_message_full": "✅ تم إنشاء جميع الألبومات بنجاح!\nيمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه."
+    "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه." # الرسالة الجديدة الدائمة
 }
 
 # التعليقات الجاهزة كأزرار
@@ -83,6 +84,11 @@ PREDEFINED_CAPTION_BUTTONS = [
     "حصريات🌈",
     "عربي منوع🌈🔥.",
     "اجنبي منوع🌈🔥.",
+    "عربي 🌈🔥.",
+    "اجنبي 🌈🔥.", # تم تصحيح المسافة إذا أردت
+    "منوعات 🌈🔥.", # تم تصحيح المسافة إذا أردت
+    "حصريات عربي 🌈🔥.", # تم تصحيح المسافة إذا أردت
+    "حصريات اجنبي 🌈🔥.",
 ]
 
 
@@ -229,7 +235,7 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
 
 async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    الخطوة الثانية: تستقبل اختيار التعليق من الأزرار.
+    الخطوة الثانية: تستقبل اختيار التعليق من الأزرار أو تعليقًا يدويًا مباشرة.
     """
     user_choice = update.message.text
     user_chat_id = update.effective_chat.id
@@ -237,14 +243,18 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
     await delete_messages_from_queue(context, user_chat_id)
 
     if user_choice == MESSAGES["album_comment_option_manual"]:
+        # إذا اختار المستخدم "إدخال تعليق يدوي"
         prompt_manual_msg = await update.message.reply_text(
-            MESSAGES["album_caption_manual_prompt"],
+            MESSAGES["album_caption_manual_prompt"], # يمكن تعديل هذا النص إذا كنت لا تريده منفصلاً
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=ReplyKeyboardRemove()
         )
         context.user_data["messages_to_delete"].append(prompt_manual_msg.message_id)
-        return ASKING_FOR_MANUAL_CAPTION
+        # العودة إلى هذه الحالة، لجعل "filters.TEXT" تستقبل التعليق اليدوي
+        # ولكن بما أننا سنعالج النص مباشرة هنا، لن نحتاج لحالة جديدة.
+        return ASKING_FOR_SEND_LOCATION # انتقل مباشرة لطلب مكان الإرسال
     elif user_choice in PREDEFINED_CAPTION_BUTTONS:
+        # إذا اختار المستخدم تعليقًا جاهزًا
         user_caption = user_choice
         context.user_data["current_album_caption"] = user_caption
         
@@ -252,30 +262,22 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["caption_status_message"] = caption_status_message
         
         return await ask_for_send_location(update, context)
-
     else:
-        error_msg = await update.message.reply_text("خيار غير صالح. الرجاء الاختيار من الأزرار المقدمة أو الضغط على /cancel لإلغاء العملية.")
-        context.user_data["messages_to_delete"].append(error_msg.message_id)
-        return ASKING_FOR_CAPTION
+        # **التعديل هنا:** إذا لم يكن اختيارًا من الأزرار المعروفة، نعتبره تعليقًا يدويًا.
+        user_caption = user_choice
+        if user_caption == '.': # If user enters a period, no caption
+            user_caption = ""
 
-async def receive_manual_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    الخطوة الثالثة: تستقبل التعليق اليدوي.
-    """
-    user_caption = update.message.text
-    user_chat_id = update.effective_chat.id
+        context.user_data["current_album_caption"] = user_caption
+        caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_caption) if user_caption else MESSAGES["album_caption_confirm_no_caption"]
+        context.user_data["caption_status_message"] = caption_status_message
 
-    if user_caption == '.':
-        user_caption = ""
+        # ثم ننتقل مباشرة لطلب مكان الإرسال
+        return await ask_for_send_location(update, context)
 
-    context.user_data["current_album_caption"] = user_caption
-    
-    await delete_messages_from_queue(context, user_chat_id)
-
-    caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_caption) if user_caption else MESSAGES["album_caption_confirm_no_caption"]
-    context.user_data["caption_status_message"] = caption_status_message
-
-    return await ask_for_send_location(update, context)
+# -------------------------------------------------------------
+# دالة receive_manual_album_caption تم إزالتها!
+# -------------------------------------------------------------
 
 async def ask_for_send_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -334,32 +336,40 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     )
     context.user_data["progress_message_id"] = progress_msg.message_id
 
-    # **التعديل الجديد هنا: إضافة تأخير قصير**
-    # هذا يمنح Telegram وقتاً لمعالجة الرسالة وجعلها قابلة للتعديل
-    await asyncio.sleep(0.5) # تأخير نصف ثانية كافٍ غالباً
+    # إضافة تأخير قصير لمنح Telegram وقتًا لمعالجة الرسالة وجعلها قابلة للتعديل
+    # هذا مهم بشكل خاص للألبومات الصغيرة حيث يتم التعديل بسرعة
+    await asyncio.sleep(0.5) 
 
 
     await execute_album_creation(update, context, user_caption, send_chat_id)
 
-    # بعد الانتهاء، نرسل رسالة النجاح
-    success_msg = await update.message.reply_text(
-        MESSAGES["success_message_full"], 
-        reply_markup=ReplyKeyboardMarkup([
-            [KeyboardButton(MESSAGES["keyboard_done"])],
-            [KeyboardButton(MESSAGES["keyboard_clear"])]
-        ], resize_keyboard=True, one_time_keyboard=False)
+    # بعد الانتهاء، نرسل رسالة النجاح المؤقتة
+    temp_success_msg = await update.message.reply_text(
+        MESSAGES["album_creation_success"], 
+        reply_markup=ReplyKeyboardRemove() # مهم: إزالة لوحة المفاتيح منها حتى لا تختفي معها الرئيسية
     )
-    context.user_data["success_message_id"] = success_msg.message_id
+    context.user_data["success_message_id"] = temp_success_msg.message_id
 
-    # حذف رسالة التقدم القديمة فوراً
-    await delete_messages_from_queue(context, user_chat_id)
+    # إرسال رسالة منفصلة بلوحة المفاتيح الرئيسية الدائمة
+    main_keyboard = [
+        [KeyboardButton(MESSAGES["keyboard_done"])],
+        [KeyboardButton(MESSAGES["keyboard_clear"])]
+    ]
+    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
+    await update.message.reply_text(
+        MESSAGES["success_message_permanent_prompt"], # استخدام النص الجديد
+        reply_markup=reply_markup_main
+    )
 
-    # إنشاء مهمة خلفية لحذف رسالة النجاح بعد تأخير
+    # حذف رسالة التقدم القديمة فوراً (تم حذفها بواسطة delete_messages_from_queue)
+    # والآن نحذف فقط الرسائل الأخرى المؤقتة إذا كانت موجودة، وهي فقط temp_success_msg هنا
+
+    # إنشاء مهمة خلفية لحذف رسالة النجاح المؤقتة بعد تأخير
     context.application.create_task(
         delete_success_message_after_delay(
             bot=context.bot,
             chat_id=user_chat_id,
-            message_id=success_msg.message_id,
+            message_id=temp_success_msg.message_id, # استخدام معرف الرسالة المؤقتة
             delay=3,
             context_user_data=context.user_data 
         )
@@ -388,14 +398,18 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
     context.user_data.pop("progress_message_id", None)
-    context.user_data.pop("success_message_id", None)
+    context.user_data.pop("success_message_id", None) 
+
+    # التأكد من إعادة لوحة المفاتيح الرئيسية عند الإلغاء
+    main_keyboard = [
+        [KeyboardButton(MESSAGES["keyboard_done"])],
+        [KeyboardButton(MESSAGES["keyboard_clear"])]
+    ]
+    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
 
     await update.message.reply_text(
         MESSAGES["cancel_caption"],
-        reply_markup=ReplyKeyboardMarkup([
-            [KeyboardButton(MESSAGES["keyboard_done"])],
-            [KeyboardButton(MESSAGES["keyboard_clear"])]
-        ], resize_keyboard=True, one_time_keyboard=False)
+        reply_markup=reply_markup_main # إعادة لوحة المفاتيح
     )
     return ConversationHandler.END
 
@@ -516,14 +530,14 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data.pop("progress_message_id", None)
     context.user_data.pop("success_message_id", None)
 
-    await update.message.reply_text(MESSAGES["queue_cleared"])
-
-    keyboard = [
+    # التأكد من إعادة لوحة المفاتيح الرئيسية عند إعادة التعيين
+    main_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
         [KeyboardButton(MESSAGES["keyboard_clear"])]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    await update.message.reply_text("البوت جاهز لاستقبال ملفات جديدة.", reply_markup=reply_markup)
+    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+    await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=reply_markup_main)
     
     return ConversationHandler.END
 
@@ -542,12 +556,11 @@ def main() -> None:
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_done'])}$") & ~filters.COMMAND, start_album_creation_process)
         ],
         states={
+            # تم تعديل هذا المعالج لقبول التعليق اليدوي مباشرة
             ASKING_FOR_CAPTION: [
-                MessageHandler(filters.TEXT & filters.Regex(f"({'|'.join(map(re.escape, PREDEFINED_CAPTION_BUTTONS + [MESSAGES['album_comment_option_manual']]))})") & ~filters.COMMAND, handle_caption_choice),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_caption_choice), 
             ],
-            ASKING_FOR_MANUAL_CAPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption),
-            ],
+            # ASKING_FOR_MANUAL_CAPTION لم تعد مستخدمة في states
             ASKING_FOR_SEND_LOCATION: [
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['send_to_channel_button'])}$|^^{re.escape(MESSAGES['send_to_chat_button'])}$") & ~filters.COMMAND, handle_send_location_choice),
             ],
@@ -559,7 +572,7 @@ def main() -> None:
             CommandHandler("help", help_command), 
             CommandHandler("settings", settings_command), 
             CommandHandler("source", source_command),
-            MessageHandler(filters.ALL & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text("لا أستطيع فهم طلبك الآن. الرجاء الاختيار من الأزرار أو إدخال تعليق."))
+            MessageHandler(filters.ALL & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text("لا أستطيع فهم طلبك الآن. الرجاء الاختيار من الأزرار أو إدخال تعليق يدوي أو إلغاء العملية."))
         ]
     )
 
