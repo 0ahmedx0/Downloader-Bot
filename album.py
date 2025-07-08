@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 # الحالات للمحادثة
 ASKING_FOR_CAPTION = 1
-# يمكنك إضافة المزيد من الحالات إذا احتجت محادثات متعددة الخطوات أكثر تعقيدًا
+# حالة جديدة لطلب التعليق اليدوي بعد اختيار زر "إدخال تعليق يدوي"
+ASKING_FOR_MANUAL_CAPTION = 2 
 
 # الرسائل المستخدمة
 MESSAGES = {
@@ -48,19 +49,32 @@ MESSAGES = {
     ),
     "settings": "There are no settings to be made here",
     "source": "https://github.com/wjclub/telegram-bot-album-creator",
-    "keyboard_done": "Create Album",
-    "keyboard_clear": "Reset Album",
+    "keyboard_done": "إنشاء ألبوم",
+    "keyboard_clear": "إعادة تعيين الألبوم",
     "not_enough_media_items": "📦 تحتاج إلى إرسال صورتين أو أكثر لتكوين ألبوم.",
     "queue_cleared": "لقد نسيت كل الصور والفيديوهات التي أرسلتها لي. لديك فرصة جديدة.",
-    "album_caption_prompt": "الرجاء إدخال *التعليق* الذي تريده للألبوم. (سيكون هذا هو التعليق فقط لأول وسائط في كل ألبوم إذا كان هناك ألبومات متعددة).\n\nإذا كنت لا تريد أي تعليق، فقط أرسل لي نقطة `.`",
+    "album_caption_prompt": "الرجاء اختيار تعليق للألبوم من الأزرار أدناه، أو اختر *إدخال تعليق يدوي*:",
+    "album_caption_manual_prompt": "الرجاء إدخال التعليق الذي تريده للألبوم. (سيكون هذا هو التعليق فقط لأول وسائط في كل ألبوم إذا كان هناك ألبومات متعددة).\n\nإذا كنت لا تريد أي تعليق، فقط أرسل لي نقطة `.`",
     "album_caption_confirm": "👍 حسناً! التعليق الذي اخترته هو: `{caption}`.\nجاري إنشاء الألبوم الآن...",
     "processing_album": "⏳ جاري إنشاء الألبوم. قد يستغرق هذا بعض الوقت...",
     "progress_update": "جاري إرسال الألبوم: *{processed_albums}/{total_albums}*\nالوقت المتبقي المقدر: *{time_remaining_str}*.",
     "album_creation_success": "✅ تم إنشاء جميع الألبومات بنجاح!",
     "album_creation_error": "❌ حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة لاحقاً.",
     "album_chunk_fail": "⚠️ فشل إرسال جزء من الألبوم ({index}/{total_albums}). سأحاول الاستمرار مع البقية.",
-    "cancel_caption": "لقد ألغيت عملية إنشاء الألبوم. يمكنك البدء من جديد."
+    "cancel_caption": "لقد ألغيت عملية إنشاء الألبوم. يمكنك البدء من جديد.",
+    "album_comment_option_manual": "إدخال تعليق يدوي",
 }
+
+# التعليقات الجاهزة كأزرار
+PREDEFINED_CAPTION_BUTTONS = [
+    "عرض ورعان اجانب 🌈💋",
+    "🌈 🔥 .",
+    "حصريات منوع🌈🔥.",
+    "حصريات🌈",
+    "عربي منوع🌈🔥.",
+    "اجنبي منوع🌈🔥.",
+]
+
 
 # دالة التأخير العشوائي
 prev_delay = None
@@ -154,7 +168,7 @@ async def send_media_group_with_backoff(update: Update, context: ContextTypes.DE
 
 async def start_album_creation_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    الخطوة الأولى في محادثة إنشاء الألبوم: تطلب من المستخدم إدخال التعليق.
+    الخطوة الأولى في محادثة إنشاء الألبوم: تطلب من المستخدم اختيار أو إدخال التعليق.
     """
     await initialize_user_data(context)
     media_queue = context.user_data.get("media_queue", [])
@@ -164,20 +178,71 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
         await update.message.reply_text(MESSAGES["not_enough_media_items"])
         return ConversationHandler.END # إنهاء المحادثة
     
+    # إنشاء لوحة المفاتيح مع التعليقات الجاهزة وخيار التعليق اليدوي
+    keyboard = []
+    for caption_text in PREDEFINED_CAPTION_BUTTONS:
+        keyboard.append([KeyboardButton(caption_text)])
+    keyboard.append([KeyboardButton(MESSAGES["album_comment_option_manual"])])
+    
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True) # one_time_keyboard=True لإخفاء الأزرار بعد الاختيار
+    
     # إرسال رسالة طلب التعليق وتخزينها لحذفها لاحقاً
     prompt_msg = await update.message.reply_text(
         MESSAGES["album_caption_prompt"],
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardRemove() # إزالة لوحة المفاتيح المخصصة مؤقتًا
+        reply_markup=reply_markup
     )
     context.user_data["messages_to_delete"].append(prompt_msg.message_id)
     
-    # ندخل حالة انتظار التعليق
+    # ندخل حالة انتظار التعليق (الخيار من الأزرار أو الإدخال اليدوي)
     return ASKING_FOR_CAPTION
 
-async def receive_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    الخطوة الثانية: تستقبل التعليق وتبدأ في إنشاء الألبوم.
+    الخطوة الثانية: تستقبل اختيار التعليق من الأزرار.
+    """
+    user_choice = update.message.text
+
+    if user_choice == MESSAGES["album_comment_option_manual"]:
+        # إذا اختار المستخدم "إدخال تعليق يدوي"
+        prompt_manual_msg = await update.message.reply_text(
+            MESSAGES["album_caption_manual_prompt"],
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardRemove() # إزالة لوحة المفاتيح المؤقتة
+        )
+        context.user_data["messages_to_delete"].append(prompt_manual_msg.message_id)
+        return ASKING_FOR_MANUAL_CAPTION # الانتقال لحالة طلب التعليق اليدوي
+    elif user_choice in PREDEFINED_CAPTION_BUTTONS:
+        # إذا اختار المستخدم تعليقًا جاهزًا
+        user_caption = user_choice
+        context.user_data["current_album_caption"] = user_caption
+
+        confirm_msg = await update.message.reply_text(
+            MESSAGES["album_caption_confirm"].format(caption=user_caption),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=ReplyKeyboardRemove() # إزالة لوحة المفاتيح بعد الاختيار
+        )
+        context.user_data["messages_to_delete"].append(confirm_msg.message_id)
+
+        await execute_album_creation(update, context, user_caption)
+        
+        # إعادة لوحة المفاتيح الرئيسية بعد الانتهاء
+        main_keyboard = [
+            [KeyboardButton(MESSAGES["keyboard_done"])],
+            [KeyboardButton(MESSAGES["keyboard_clear"])]
+        ]
+        reply_markup = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
+        await update.message.reply_text("يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه.", reply_markup=reply_markup)
+
+        return ConversationHandler.END # إنهاء المحادثة
+    else:
+        # إذا أرسل المستخدم شيئًا آخر غير الأزرار المتوقعة في هذه الحالة
+        await update.message.reply_text("خيار غير صالح. الرجاء الاختيار من الأزرار المقدمة أو الضغط على /cancel لإلغاء العملية.")
+        return ASKING_FOR_CAPTION # البقاء في نفس الحالة حتى يتم الاختيار الصحيح
+
+async def receive_manual_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    الخطوة الثالثة: تستقبل التعليق اليدوي وتبدأ في إنشاء الألبوم.
     """
     user_caption = update.message.text
     if user_caption == '.': # إذا أدخل المستخدم نقطة، لا يوجد تعليق
@@ -193,7 +258,6 @@ async def receive_album_caption(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["messages_to_delete"].append(confirm_msg.message_id)
 
     # يمكننا الآن استدعاء الدالة التي تقوم فعليًا بإنشاء الألبوم
-    # يتم تمرير update و context هنا
     await execute_album_creation(update, context, user_caption)
 
     # بعد الانتهاء من الإرسال، نقوم بإعادة لوحة المفاتيح وإغلاق المحادثة
@@ -208,10 +272,10 @@ async def receive_album_caption(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    يلغي محادثة التعليق إذا ضغط المستخدم على Clear Album أثناء المطالبة.
+    يلغي محادثة التعليق إذا ضغط المستخدم على Clear Album أو /cancel أثناء المطالبة.
     """
     chat_id = update.effective_chat.id
-    await delete_messages_from_queue(context, chat_id) # حذف رسالة المطالبة بالتعليق
+    await delete_messages_from_queue(context, chat_id) # حذف رسالة المطالبة بالتعليق وأي رسائل مؤكدة
     context.user_data["media_queue"] = [] # إعادة تعيين قائمة الوسائط
     await update.message.reply_text(
         MESSAGES["cancel_caption"],
@@ -323,14 +387,16 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await initialize_user_data(context)
     chat_id = update.effective_chat.id
     # إذا كان هناك محادثة جارية، قم بإنهاءها أولاً
-    if "current_album_caption" in context.user_data: # check if conversation is active (rough check)
-        context.user_data.pop("current_album_caption", None) # clear potential caption state
+    # هذا ليس الطريقة الأفضل لإنهاء محادثة ConversationHandler بشكل صريح،
+    # الأفضل هو العودة إلى ConversationHandler.END من داخل handler function.
+    # ولكن للتأكد من مسح الحالة، يمكننا إعادة تعيين بعض البيانات هنا.
+    context.user_data.pop("current_album_caption", None) # clear potential caption state
     
     await delete_messages_from_queue(context, chat_id)
     context.user_data["media_queue"] = []
     await update.message.reply_text(MESSAGES["queue_cleared"])
 
-    # هنا نضمن إزالة لوحة المفاتيح المؤقتة وإعادة لوحة المفاتيح الرئيسية إذا كانت محادثة التعليق قيد التقدم
+    # هنا نضمن إزالة لوحة المفاتيح المؤقتة وإعادة لوحة المفاتيح الرئيسية
     keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
         [KeyboardButton(MESSAGES["keyboard_clear"])]
@@ -358,19 +424,23 @@ def main() -> None:
         ],
         states={
             ASKING_FOR_CAPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_album_caption)
+                # تقبل التعليقات الجاهزة بالإضافة إلى خيار "إدخال تعليق يدوي"
+                MessageHandler(filters.TEXT & filters.Regex(f"({'|'.join(map(re.escape, PREDEFINED_CAPTION_BUTTONS + [MESSAGES['album_comment_option_manual']]))})") & ~filters.COMMAND, handle_caption_choice),
+            ],
+            ASKING_FOR_MANUAL_CAPTION: [
+                # تقبل أي نص كتعليق يدوي
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption),
             ]
         },
         fallbacks=[
-            # إذا ضغط المستخدم على "Clear Album" أثناء طلب التعليق
+            # إذا ضغط المستخدم على "Clear Album" أو /cancel أثناء طلب التعليق (أو أي حالة في المحادثة)
             MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$") & ~filters.COMMAND, cancel_album_creation),
+            CommandHandler("cancel", cancel_album_creation), # للهروب من المحادثة
             # للتعامل مع أي أوامر أخرى أثناء المحادثة (يمكن تعديلها حسب الحاجة)
-            CommandHandler("start", cancel_album_creation), # للهروب من المحادثة
+            CommandHandler("start", cancel_album_creation),
             CommandHandler("help", cancel_album_creation),
             CommandHandler("settings", cancel_album_creation),
             CommandHandler("source", cancel_album_creation),
-            # الرسائل الأخرى (صور/فيديو) ستكسر المحادثة مؤقتاً لكنها لا تلغيها بالكامل
-            # يمكن إضافة معالج filters.ALL لضمان أن كل شيء يقود لـ cancel إذا أردت صارمية
         ]
     )
 
@@ -381,22 +451,20 @@ def main() -> None:
 
     application.add_handler(caption_conversation_handler) # أضف الـ ConversationHandler أولاً
 
-    # تأكد أن هذه المعالجات لن تتضارب مع ConversationHandler أثناء حالاته
-    # ConversationHandler يتعامل مع filters.TEXT أولاً في هذه الحالة
-    # ومعالجات add_photo/add_video ستظل تعمل خارج المحادثة
+    # معالجات إضافة الوسائط (تظل تعمل خارج المحادثة)
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, add_photo))
     application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, add_video))
 
-    # تأكد أن معالج Reset Album يعمل دائمًا، سواء كان جزءًا من محادثة أم لا.
-    # بما أننا أضفناه كـ fallback لـ ConversationHandler، فهو يتعامل مع حالة المحادثة
-    # ولضمان عمله في جميع الأوقات، سنتركه هنا أيضًا. Python-telegram-bot
-    # يتعامل مع أولوية المعالجات. إذا تم استهلاك الرسالة بواسطة ConversationHandler
-    # فلن تصل إلى هذا المعالج. ولكننا قمنا بتعديل cancel_album_creation ليؤدي وظيفة إعادة التعيين.
+    # تأكد أن معالج Reset Album يعمل دائمًا.
+    # بما أننا أضفناه كـ fallback لـ ConversationHandler، فهو يتعامل مع حالة المحادثة.
+    # لإنهائه إذا لم يكن هناك محادثة جارية وتلقى هذا الزر، لا ضرر من وجوده هنا.
+    # `reset_album` هنا سيعالج الرسالة فقط إذا لم يتم استهلاكها بواسطة `caption_conversation_handler`.
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{MESSAGES['keyboard_clear']}$") & ~filters.COMMAND, reset_album))
-
 
     logger.info("Bot started polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
+    # إضافة لاستيراد `re` المستخدم في `filters.Regex`
+    import re 
     main()
