@@ -293,66 +293,74 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     """
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
-    chat_id = update.effective_chat.id
+    user_chat_id = update.effective_chat.id
+    channel_id = os.getenv("CHANNEL_ID")  # يمكن أن يكون ID (رقم) أو Username مثل "@mychannel"
 
-    logger.info("Starting album conversion. Total media stored: %d", total_media)
+    if not channel_id:
+        await update.message.reply_text("❌ لم يتم ضبط متغير البيئة CHANNEL_ID.")
+        return
 
-    # الحد الأقصى للعناصر في الألبوم الواحد (تيليجرام يسمح بـ 10)
+    logger.info("بدء تحويل الألبوم. عدد الوسائط: %d", total_media)
+
     max_items_per_album = 10
     num_albums = math.ceil(total_media / max_items_per_album)
-    
+
     base_chunk_size = total_media // num_albums
     remainder = total_media % num_albums
-    
+
     chunk_sizes = []
     for i in range(num_albums):
         current_size = base_chunk_size
         if i < remainder:
             current_size += 1
         chunk_sizes.append(current_size)
-        
+
     chunks = []
     current_idx = 0
     for size in chunk_sizes:
-        chunks.append(media_queue[current_idx : current_idx + size])
+        chunks.append(media_queue[current_idx: current_idx + size])
         current_idx += size
 
     total_albums = len(chunks)
     processed_albums = 0
-    
-    progress_msg = None 
+    progress_msg = None
 
     for index, chunk in enumerate(chunks):
         input_media = []
         for i, item in enumerate(chunk):
-            if i == 0:
-                if item["type"] == "photo":
-                    input_media.append(InputMediaPhoto(media=item["media"], caption=album_caption))
-                elif item["type"] == "video":
-                    input_media.append(InputMediaVideo(media=item["media"], caption=album_caption))
-            else:
-                if item["type"] == "photo":
-                    input_media.append(InputMediaPhoto(media=item["media"]))
-                elif item["type"] == "video":
-                    input_media.append(InputMediaVideo(media=item["media"]))
+            caption = album_caption if i == 0 else None
+            if item["type"] == "photo":
+                input_media.append(InputMediaPhoto(media=item["media"], caption=caption))
+            elif item["type"] == "video":
+                input_media.append(InputMediaVideo(media=item["media"], caption=caption))
 
-        success = await send_media_group_with_backoff(update, context, input_media, chat_id, index)
-        if not success:
-            logger.error("Failed to send album chunk %d after retries.", index + 1)
-            error_message = MESSAGES["album_chunk_fail"].format(index=index + 1, total_albums=total_albums)
-            try:
-                error_feedback_msg = await update.message.reply_text(error_message)
-                context.user_data["messages_to_delete"].append(error_feedback_msg.message_id)
-            except Exception as e:
-                logger.error(f"Failed to send error feedback message: {e}")
+        # إرسال الألبوم للقناة
+        try:
+            sent_messages = await context.bot.send_media_group(chat_id=channel_id, media=input_media)
+            logger.info("تم إرسال الدفعة %d إلى القناة.", index + 1)
+
+            # تثبيت أول رسالة من الألبوم
+            if sent_messages:
+                try:
+                    await context.bot.pin_chat_message(chat_id=channel_id, message_id=sent_messages[0].message_id, disable_notification=True)
+                    logger.info("تم تثبيت الرسالة الأولى من الألبوم.")
+                except Exception as pin_err:
+                    logger.error("فشل في تثبيت الرسالة: %s", pin_err)
+                    await update.message.reply_text("⚠️ تم إرسال الألبوم لكن تعذر تثبيت الرسالة الأولى.")
+
+        except RetryAfter as e:
+            logger.warning("RetryAfter: الدفعة %d. سيتم الانتظار %s ثانية.", index + 1, e.retry_after)
+            await asyncio.sleep(e.retry_after)
             continue
+        except Exception as e:
+            logger.error("حدث خطأ أثناء إرسال الألبوم: %s", e)
+            await update.message.reply_text(MESSAGES["album_creation_error"])
+            return
 
         processed_albums += 1
         remaining_albums = total_albums - processed_albums
-        
         avg_delay_per_album = (get_random_delay(min_delay=5, max_delay=30, min_diff=7) + 5)
         estimated_time_remaining = remaining_albums * avg_delay_per_album
-        
         minutes, seconds = divmod(int(estimated_time_remaining), 60)
         time_remaining_str = f"{minutes} دقيقة و {seconds} ثانية" if minutes > 0 else f"{seconds} ثانية"
 
@@ -361,7 +369,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
             total_albums=total_albums,
             time_remaining_str=time_remaining_str
         )
-        
+
         try:
             if progress_msg:
                 await progress_msg.edit_text(current_progress_text, parse_mode=ParseMode.MARKDOWN)
@@ -369,17 +377,13 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
                 progress_msg = await update.message.reply_text(current_progress_text, parse_mode=ParseMode.MARKDOWN)
                 context.user_data["messages_to_delete"].append(progress_msg.message_id)
         except Exception as e:
-            logger.error("Failed to update/send progress message: %s", e)
+            logger.error("فشل في تحديث رسالة التقدم: %s", e)
 
-        delay_between_albums = get_random_delay()
         if index < len(chunks) - 1:
-            await asyncio.sleep(delay_between_albums)
-    
-    context.user_data["media_queue"] = []
-    
-    # حذف جميع الرسائل التي تم تتبعها
-    await delete_messages_from_queue(context, chat_id)
+            await asyncio.sleep(get_random_delay())
 
+    context.user_data["media_queue"] = []
+    await delete_messages_from_queue(context, user_chat_id)
     await update.message.reply_text(MESSAGES["album_creation_success"])
 
 # إعادة ضبط قائمة الوسائط
