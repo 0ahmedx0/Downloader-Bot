@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
-from telegram.error import RetryAfter
+from telegram.error import RetryAfter, TelegramError
 from telegram.constants import ParseMode
 
 
@@ -83,6 +83,11 @@ PREDEFINED_CAPTION_BUTTONS = [
     "حصريات🌈",
     "عربي منوع🌈🔥.",
     "اجنبي منوع🌈🔥.",
+    "عربي 🌈🔥.",
+    " اجنبي 🌈🔥.",
+    " منوعات 🌈🔥.",
+    " حصريات عربي 🌈🔥.",
+    "حصريات اجنبي 🌈🔥.",
 ]
 
 
@@ -100,9 +105,8 @@ def get_random_delay(min_delay=5, max_delay=30, min_diff=7):
 # تهيئة بيانات المستخدم
 async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
     """يضمن تهيئة context.user_data وقائمة الوسائط."""
-    # تأكد أن user_data هو dict قبل محاولة الوصول إليه
     if context.user_data is None:
-        context.user_data = {} # تهيئته كقاموس فارغ إذا كان None
+        context.user_data = {}
 
     if "media_queue" not in context.user_data:
         context.user_data["media_queue"] = []
@@ -115,8 +119,8 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
 
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """يحذف جميع الرسائل المخزنة في قائمة messages_to_delete."""
-    if context.user_data is None: # تأكد مرة أخرى
-        return # لا يمكن الحذف إذا كانت user_data None
+    if context.user_data is None:
+        return
 
     if "messages_to_delete" in context.user_data:
         message_ids = list(context.user_data["messages_to_delete"])
@@ -327,12 +331,18 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
         context.user_data["messages_to_delete"].append(error_msg.message_id)
         return ASKING_FOR_SEND_LOCATION
 
+    # إرسال رسالة "جاري إنشاء الألبوم" وتثبيتها كرسالة التقدم
     progress_msg = await update.message.reply_text(
         MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums="?", time_remaining_str="...") ,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=ReplyKeyboardRemove()
     )
     context.user_data["progress_message_id"] = progress_msg.message_id
+
+    # **التعديل الجديد هنا: إضافة تأخير قصير**
+    # هذا يمنح Telegram وقتاً لمعالجة الرسالة وجعلها قابلة للتعديل
+    await asyncio.sleep(0.5) # تأخير نصف ثانية كافٍ غالباً
+
 
     await execute_album_creation(update, context, user_caption, send_chat_id)
 
@@ -346,12 +356,10 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     )
     context.user_data["success_message_id"] = success_msg.message_id
 
-    # حذف رسالة التقدم القديمة فوراً (success_msg ليست في messages_to_delete)
-    # نستخدم delete_messages_from_queue لحذف progress_message_id
-    # تأكدنا أنها لا تحاول حذف success_message_id
+    # حذف رسالة التقدم القديمة فوراً
     await delete_messages_from_queue(context, user_chat_id)
 
-    # **التعديل هنا:** إنشاء مهمة خلفية لحذف رسالة النجاح بعد تأخير
+    # إنشاء مهمة خلفية لحذف رسالة النجاح بعد تأخير
     context.application.create_task(
         delete_success_message_after_delay(
             bot=context.bot,
@@ -385,7 +393,7 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
     context.user_data.pop("progress_message_id", None)
-    context.user_data.pop("success_message_id", None) # تأكد من مسح هذا
+    context.user_data.pop("success_message_id", None)
 
     await update.message.reply_text(
         MESSAGES["cancel_caption"],
@@ -489,8 +497,11 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
                     text=current_progress_text,
                     parse_mode=ParseMode.MARKDOWN
                 )
+        except TelegramError as e: 
+            logger.error("Failed to edit progress message (ID: %s). It might be non-editable: %s", progress_message_id, e)
         except Exception as e:
-            logger.error("فشل في تحديث رسالة التقدم (ID: %s): %s", progress_message_id, e)
+            logger.error("An unexpected error occurred while editing progress message (ID: %s): %s", progress_message_id, e)
+
 
         if index < len(chunks) - 1:
             await asyncio.sleep(get_random_delay())
@@ -549,11 +560,10 @@ def main() -> None:
         fallbacks=[
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, cancel_album_creation),
             CommandHandler("cancel", cancel_album_creation),
-            CommandHandler("start", start), # يذهب إلى بداية المحادثة
-            CommandHandler("help", help_command), # هذا سيستخدم help_command الأصلي
-            CommandHandler("settings", settings_command), # هذا سيستخدم settings_command الأصلي
-            CommandHandler("source", source_command), # هذا سيستخدم source_command الأصلي
-            # للمرسلات الأخرى التي ليست أوامر ولست جزءًا من الخيارات
+            CommandHandler("start", start), 
+            CommandHandler("help", help_command), 
+            CommandHandler("settings", settings_command), 
+            CommandHandler("source", source_command),
             MessageHandler(filters.ALL & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text("لا أستطيع فهم طلبك الآن. الرجاء الاختيار من الأزرار أو إدخال تعليق."))
         ]
     )
