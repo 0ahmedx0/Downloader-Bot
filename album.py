@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
-from telegram.error import RetryAfter, TelegramError # استيراد TelegramError
+from telegram.error import RetryAfter, TelegramError
 from telegram.constants import ParseMode
 
 
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 # الحالات للمحادثة
 ASKING_FOR_CAPTION = 1
+ASKING_FOR_MANUAL_CAPTION = 2 
 ASKING_FOR_SEND_LOCATION = 3 
 
 # الرسائل المستخدمة
@@ -71,7 +72,7 @@ MESSAGES = {
     "channel_id_missing": "❌ لم يتم ضبط متغير البيئة CHANNEL_ID. لا يمكن الإرسال للقناة.",
     "invalid_send_location_choice": "خيار غير صالح. الرجاء الاختيار من الأزرار.",
     "album_action_confirm": "{caption_status}أين تود إرسال الألبوم؟", 
-    "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه."
+    "success_message_full": "✅ تم إنشاء جميع الألبومات بنجاح!\nيمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه."
 }
 
 # التعليقات الجاهزة كأزرار
@@ -82,11 +83,6 @@ PREDEFINED_CAPTION_BUTTONS = [
     "حصريات🌈",
     "عربي منوع🌈🔥.",
     "اجنبي منوع🌈🔥.",
-    "عربي 🌈🔥.",
-    "اجنبي 🌈🔥.", 
-    "منوعات 🌈🔥.", 
-    "حصريات عربي 🌈🔥.", 
-    "حصريات اجنبي 🌈🔥.",
 ]
 
 
@@ -117,14 +113,10 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
         context.user_data["success_message_id"] = None
 
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """
-    يحذف جميع الرسائل المؤقتة المخزنة في قائمة messages_to_delete.
-    ويشمل أيضاً رسالة التقدم (progress_message_id) في حال وجودها.
-    """
+    """يحذف جميع الرسائل المخزنة في قائمة messages_to_delete."""
     if context.user_data is None:
         return
 
-    # حذف الرسائل من قائمة messages_to_delete
     if "messages_to_delete" in context.user_data:
         message_ids = list(context.user_data["messages_to_delete"])
         for msg_id in message_ids:
@@ -135,7 +127,6 @@ async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id
                 logger.debug(f"Could not delete message {msg_id} in chat {chat_id}: {e}")
         context.user_data["messages_to_delete"].clear()
     
-    # حذف رسالة التقدم إذا كانت لا تزال موجودة
     if "progress_message_id" in context.user_data and context.user_data["progress_message_id"] is not None:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=context.user_data["progress_message_id"])
@@ -211,7 +202,7 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
     """
     await initialize_user_data(context)
     user_chat_id = update.effective_chat.id
-    await delete_messages_from_queue(context, user_chat_id) 
+    await delete_messages_from_queue(context, user_chat_id)
 
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
@@ -238,12 +229,12 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
 
 async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    الخطوة الثانية: تستقبل اختيار التعليق من الأزرار أو تعليقًا يدويًا مباشرة.
+    الخطوة الثانية: تستقبل اختيار التعليق من الأزرار.
     """
     user_choice = update.message.text
     user_chat_id = update.effective_chat.id
     
-    await delete_messages_from_queue(context, user_chat_id) 
+    await delete_messages_from_queue(context, user_chat_id)
 
     if user_choice == MESSAGES["album_comment_option_manual"]:
         prompt_manual_msg = await update.message.reply_text(
@@ -252,7 +243,7 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=ReplyKeyboardRemove()
         )
         context.user_data["messages_to_delete"].append(prompt_manual_msg.message_id)
-        return ASKING_FOR_SEND_LOCATION 
+        return ASKING_FOR_MANUAL_CAPTION
     elif user_choice in PREDEFINED_CAPTION_BUTTONS:
         user_caption = user_choice
         context.user_data["current_album_caption"] = user_caption
@@ -261,17 +252,30 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["caption_status_message"] = caption_status_message
         
         return await ask_for_send_location(update, context)
+
     else:
-        user_caption = user_choice
-        if user_caption == '.': 
-            user_caption = ""
+        error_msg = await update.message.reply_text("خيار غير صالح. الرجاء الاختيار من الأزرار المقدمة أو الضغط على /cancel لإلغاء العملية.")
+        context.user_data["messages_to_delete"].append(error_msg.message_id)
+        return ASKING_FOR_CAPTION
 
-        context.user_data["current_album_caption"] = user_caption
-        caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_caption) if user_caption else MESSAGES["album_caption_confirm_no_caption"]
-        context.user_data["caption_status_message"] = caption_status_message
+async def receive_manual_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    الخطوة الثالثة: تستقبل التعليق اليدوي.
+    """
+    user_caption = update.message.text
+    user_chat_id = update.effective_chat.id
 
-        return await ask_for_send_location(update, context)
+    if user_caption == '.':
+        user_caption = ""
 
+    context.user_data["current_album_caption"] = user_caption
+    
+    await delete_messages_from_queue(context, user_chat_id)
+
+    caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_caption) if user_caption else MESSAGES["album_caption_confirm_no_caption"]
+    context.user_data["caption_status_message"] = caption_status_message
+
+    return await ask_for_send_location(update, context)
 
 async def ask_for_send_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -306,48 +310,56 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     user_caption = context.user_data.get("current_album_caption", "")
     user_chat_id = update.effective_chat.id
     
-    await delete_messages_from_queue(context, user_chat_id) 
+    await delete_messages_from_queue(context, user_chat_id)
 
     send_chat_id = None
     if send_location_choice == MESSAGES["send_to_channel_button"]:
         send_chat_id = os.getenv("CHANNEL_ID")
         if not send_chat_id:
             error_msg = await update.message.reply_text(MESSAGES["channel_id_missing"])
-            return await ask_for_send_location(update, context) 
+            context.user_data["messages_to_delete"].append(error_msg.message_id)
+            return await ask_for_send_location(update, context)
     elif send_location_choice == MESSAGES["send_to_chat_button"]:
         send_chat_id = user_chat_id
     else:
         error_msg = await update.message.reply_text(MESSAGES["invalid_send_location_choice"])
-        return await ask_for_send_location(update, context)
+        context.user_data["messages_to_delete"].append(error_msg.message_id)
+        return ASKING_FOR_SEND_LOCATION
 
-    # **التغيير الرئيسي هنا:** execute_album_creation ستكون مسؤولة عن إرسال رسالة التقدم
-    await execute_album_creation(update, context, user_caption, send_chat_id)
-
-    # بعد اكتمال execute_album_creation، يتم التعامل مع رسالة التقدم في execute_album_creation نفسها.
-    # نرسل رسالة النجاح المؤقتة
-    temp_success_msg = await update.message.reply_text(
-        MESSAGES["album_creation_success"], 
+    # إرسال رسالة "جاري إنشاء الألبوم" وتثبيتها كرسالة التقدم
+    progress_msg = await update.message.reply_text(
+        MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums="?", time_remaining_str="...") ,
+        parse_mode=ParseMode.MARKDOWN,
         reply_markup=ReplyKeyboardRemove()
     )
-    context.user_data["success_message_id"] = temp_success_msg.message_id
+    context.user_data["progress_message_id"] = progress_msg.message_id
 
-    # إرسال رسالة منفصلة بلوحة المفاتيح الرئيسية الدائمة
-    main_keyboard = [
-        [KeyboardButton(MESSAGES["keyboard_done"])],
-        [KeyboardButton(MESSAGES["keyboard_clear"])]
-    ]
-    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-    await update.message.reply_text(
-        MESSAGES["success_message_permanent_prompt"], 
-        reply_markup=reply_markup_main
+    # **التعديل الجديد هنا: إضافة تأخير قصير**
+    # هذا يمنح Telegram وقتاً لمعالجة الرسالة وجعلها قابلة للتعديل
+    await asyncio.sleep(0.5) # تأخير نصف ثانية كافٍ غالباً
+
+
+    await execute_album_creation(update, context, user_caption, send_chat_id)
+
+    # بعد الانتهاء، نرسل رسالة النجاح
+    success_msg = await update.message.reply_text(
+        MESSAGES["success_message_full"], 
+        reply_markup=ReplyKeyboardMarkup([
+            [KeyboardButton(MESSAGES["keyboard_done"])],
+            [KeyboardButton(MESSAGES["keyboard_clear"])]
+        ], resize_keyboard=True, one_time_keyboard=False)
     )
+    context.user_data["success_message_id"] = success_msg.message_id
 
-    # تشغيل مهمة خلفية لحذف رسالة النجاح المؤقتة بعد تأخير
+    # حذف رسالة التقدم القديمة فوراً
+    await delete_messages_from_queue(context, user_chat_id)
+
+    # إنشاء مهمة خلفية لحذف رسالة النجاح بعد تأخير
     context.application.create_task(
         delete_success_message_after_delay(
             bot=context.bot,
             chat_id=user_chat_id,
-            message_id=temp_success_msg.message_id, 
+            message_id=success_msg.message_id,
             delay=3,
             context_user_data=context.user_data 
         )
@@ -375,18 +387,15 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["media_queue"] = []
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
-    context.user_data.pop("progress_message_id", None) 
-    context.user_data.pop("success_message_id", None) 
-
-    main_keyboard = [
-        [KeyboardButton(MESSAGES["keyboard_done"])],
-        [KeyboardButton(MESSAGES["keyboard_clear"])]
-    ]
-    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
+    context.user_data.pop("progress_message_id", None)
+    context.user_data.pop("success_message_id", None)
 
     await update.message.reply_text(
         MESSAGES["cancel_caption"],
-        reply_markup=reply_markup_main 
+        reply_markup=ReplyKeyboardMarkup([
+            [KeyboardButton(MESSAGES["keyboard_done"])],
+            [KeyboardButton(MESSAGES["keyboard_clear"])]
+        ], resize_keyboard=True, one_time_keyboard=False)
     )
     return ConversationHandler.END
 
@@ -404,7 +413,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     num_albums = math.ceil(total_media / max_items_per_album)
 
     base_chunk_size = total_media // num_albums
-    remainder = total_albums % num_albums # Fixed here: total_media to total_albums in calculating remainder
+    remainder = total_media % num_albums
 
     chunk_sizes = []
     for i in range(num_albums):
@@ -422,37 +431,9 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     total_albums = len(chunks)
     processed_albums = 0
     
-    # **التعديل الجديد هنا:** تهيئة progress_message_id قبل استخدامها
-    # هذا يضمن أن تكون progress_message_id معرفة حتى لو فشلت الرسالة الأولى
-    progress_message_id = None 
-
-    # إرسال رسالة التقدم لأول مرة هنا
-    try:
-        progress_msg = await context.bot.send_message(
-            chat_id=user_chat_id,
-            text=MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums=total_albums, time_remaining_str="...") ,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=ReplyKeyboardRemove()
-        )
-        context.user_data["progress_message_id"] = progress_msg.message_id
-        progress_message_id = progress_msg.message_id # **مهم:** تحديث المتغير المحلي أيضاً
-
-        # تأخير بسيط لضمان "إستقرار" رسالة التقدم كقابلة للتعديل
-        await asyncio.sleep(0.3)
-    except TelegramError as e:
-        logger.error(f"Failed to send initial progress message: {e}")
-        # إذا فشلت رسالة التقدم الأولى، لا يمكن تحديثها.
-        context.user_data["progress_message_id"] = None
-        return # إنهاء الدالة لأننا لا نستطيع متابعة التقدم
-
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while sending initial progress message: {e}")
-        context.user_data["progress_message_id"] = None
-        return # إنهاء الدالة
-
+    progress_message_id = context.user_data.get("progress_message_id")
 
     for index, chunk in enumerate(chunks):
-        # ... بقية الكود داخل الحلقة (لا تتغير)
         input_media = []
         for i, item in enumerate(chunk):
             caption = album_caption if i == 0 else None
@@ -472,16 +453,14 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         if not success:
             logger.error(f"Failed to send chunk {index + 1} to {target_chat_id}.")
             await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["album_chunk_fail"].format(index=index + 1, total_albums=total_albums))
-            context.user_data["progress_message_id"] = None # لمنع المزيد من محاولات التعديل الفاشلة
-            return 
+            continue
 
         logger.info(f"تم إرسال الدفعة {index + 1} إلى {target_chat_id}.")
 
         if target_chat_id == os.getenv("CHANNEL_ID") and sent_messages:
             try:
-                if index == 0: 
-                    await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
-                    logger.info("تم تثبيت الرسالة الأولى من الألبوم.")
+                await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
+                logger.info("تم تثبيت الرسالة الأولى من الألبوم.")
             except Exception as pin_err:
                 logger.warning(f"فشل في تثبيت الرسالة في القناة: {pin_err}")
                 if user_chat_id != target_chat_id: 
@@ -506,7 +485,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         )
 
         try:
-            if progress_message_id: # الآن progress_message_id سيكون معرفاً
+            if progress_message_id:
                 await context.bot.edit_message_text(
                     chat_id=user_chat_id,
                     message_id=progress_message_id,
@@ -514,19 +493,16 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
                     parse_mode=ParseMode.MARKDOWN
                 )
         except TelegramError as e: 
-            logger.error("Failed to edit progress message (ID: %s). It might be non-editable or deleted: %s", progress_message_id, e)
-            context.user_data["progress_message_id"] = None 
-            progress_message_id = None # مهم أيضاً هنا لمستقبل التحديثات داخل الحلقة
+            logger.error("Failed to edit progress message (ID: %s). It might be non-editable: %s", progress_message_id, e)
         except Exception as e:
             logger.error("An unexpected error occurred while editing progress message (ID: %s): %s", progress_message_id, e)
-            context.user_data["progress_message_id"] = None 
-            progress_message_id = None # مهم أيضاً
+
 
         if index < len(chunks) - 1:
             await asyncio.sleep(get_random_delay())
 
-    context.user_data["media_queue"] = [] # قائمة الوسائط تفرغ بعد انتهاء الإرسال
-    
+    context.user_data["media_queue"] = []
+
 # إعادة ضبط قائمة الوسائط
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await initialize_user_data(context)
@@ -540,13 +516,14 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data.pop("progress_message_id", None)
     context.user_data.pop("success_message_id", None)
 
-    main_keyboard = [
+    await update.message.reply_text(MESSAGES["queue_cleared"])
+
+    keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
         [KeyboardButton(MESSAGES["keyboard_clear"])]
     ]
-    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-    await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=reply_markup_main)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    await update.message.reply_text("البوت جاهز لاستقبال ملفات جديدة.", reply_markup=reply_markup)
     
     return ConversationHandler.END
 
@@ -566,7 +543,10 @@ def main() -> None:
         ],
         states={
             ASKING_FOR_CAPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_caption_choice), 
+                MessageHandler(filters.TEXT & filters.Regex(f"({'|'.join(map(re.escape, PREDEFINED_CAPTION_BUTTONS + [MESSAGES['album_comment_option_manual']]))})") & ~filters.COMMAND, handle_caption_choice),
+            ],
+            ASKING_FOR_MANUAL_CAPTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption),
             ],
             ASKING_FOR_SEND_LOCATION: [
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['send_to_channel_button'])}$|^^{re.escape(MESSAGES['send_to_chat_button'])}$") & ~filters.COMMAND, handle_send_location_choice),
@@ -579,7 +559,7 @@ def main() -> None:
             CommandHandler("help", help_command), 
             CommandHandler("settings", settings_command), 
             CommandHandler("source", source_command),
-            MessageHandler(filters.ALL & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text("لا أستطيع فهم طلبك الآن. الرجاء الاختيار من الأزرار أو إدخال تعليق يدوي أو إلغاء العملية."))
+            MessageHandler(filters.ALL & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text("لا أستطيع فهم طلبك الآن. الرجاء الاختيار من الأزرار أو إدخال تعليق."))
         ]
     )
 
