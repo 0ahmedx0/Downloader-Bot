@@ -108,31 +108,28 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
     """يضمن تهيئة context.user_data وقائمة الوسائط."""
     if "media_queue" not in context.user_data:
         context.user_data["media_queue"] = []
-    if "messages_to_delete" not in context.user_data:
+    if "messages_to_delete" not in context.user_data: # Messages that must be deleted promptly
         context.user_data["messages_to_delete"] = []
-    if "progress_message_id" not in context.user_data:
+    if "temp_messages_to_clean" not in context.user_data: # Messages that can be deleted after a delay
+        context.user_data["temp_messages_to_clean"] = []
+    if "progress_message_id" not in context.user_data: # Specific ID for the progress message
         context.user_data["progress_message_id"] = None
 
 
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """يحذف جميع الرسائل المخزنة في قائمة messages_to_delete ورسالة التقدم."""
+    """يحذف جميع الرسائل المخزنة في قائمة messages_to_delete."""
     if "messages_to_delete" in context.user_data:
         message_ids = list(context.user_data["messages_to_delete"]) 
         for msg_id in message_ids:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                logger.debug(f"Deleted message with ID: {msg_id} in chat {chat_id}")
+                logger.debug(f"Deleted message with ID: {msg_id} in chat {chat_id} (from messages_to_delete).")
             except Exception as e:
                 logger.debug(f"Could not delete message {msg_id} in chat {chat_id}: {e}")
         context.user_data["messages_to_delete"].clear()
     
-    if context.user_data.get("progress_message_id") is not None:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=context.user_data["progress_message_id"])
-            logger.debug(f"Deleted progress message with ID: {context.user_data['progress_message_id']}")
-        except Exception as e:
-            logger.debug(f"Could not delete progress message {context.user_data['progress_message_id']}: {e}")
-        context.user_data["progress_message_id"] = None
+    # رسالة التقدم يتم إدارتها بشكل منفصل في نهاية execute_album_creation 
+    # وفي وظيفة clear_all_temp_messages_after_delay
 
 # الأوامر الأساسية
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -180,6 +177,7 @@ async def send_media_group_with_backoff(context: ContextTypes.DEFAULT_TYPE, chat
         except RetryAfter as e:
             logger.warning("RetryAfter: chunk %d, attempt %d. Waiting for %s seconds.",
                            chunk_index + 1, attempt + 1, e.retry_after)
+            # إرسال رسالة تنبيه للمستخدم في دردشته الخاصة (إذا لم يكن هو المستلم)
             if chat_id_to_send_to != user_chat_id: 
                 await context.bot.send_message(chat_id=user_chat_id, text=f"⚠️ تجاوزت حد رسائل تليجرام للقناة. سأنتظر {e.retry_after} ثانية قبل إعادة المحاولة.")
             else:
@@ -210,7 +208,12 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
     """
     await initialize_user_data(context)
     user_chat_id = update.effective_chat.id
-    await delete_messages_from_queue(context, user_chat_id) # حذف رسائل من المحادثة السابقة
+    
+    # حذف كل الرسائل المؤقتة من التفاعل السابق فوراً عند بدء عملية جديدة
+    await delete_messages_from_queue(context, user_chat_id)
+    # Clear temp_messages_to_clean from any previous incomplete interactions
+    context.user_data["temp_messages_to_clean"].clear()
+
 
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
@@ -229,23 +232,24 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup
     )
-    context.user_data["messages_to_delete"].append(prompt_msg.message_id)
+    context.user_data["messages_to_delete"].append(prompt_msg.message_id) # Add to queue for prompt deletion
     
     return ASKING_FOR_CAPTION
 
 async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    الخطوة الثانية: تستقبل اختيار التعليق من الأزرار أو إشارة لإدخال تعليق يدوي.
+    تستقبل اختيار التعليق من الأزرار أو إشارة لإدخال تعليق يدوي.
     """
     user_choice = update.message.text
     
     if user_choice == MESSAGES["album_comment_option_manual"]:
         # إذا اختار المستخدم "إدخال تعليق يدوي"
-        await update.message.reply_text(
+        manual_prompt_msg = await update.message.reply_text(
             MESSAGES["album_caption_manual_prompt"],
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=ReplyKeyboardRemove() # إزالة لوحة المفاتيح المخصصة هنا
         )
+        context.user_data["messages_to_delete"].append(manual_prompt_msg.message_id)
         return ASKING_FOR_MANUAL_CAPTION # ننتقل إلى حالة طلب التعليق اليدوي
     elif user_choice in PREDEFINED_CAPTION_BUTTONS:
         # إذا اختار المستخدم تعليقًا جاهزًا
@@ -254,9 +258,8 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["caption_status_message"] = caption_status_message
         return await ask_for_send_location(update, context)
     else:
-        # هذا لن يحدث إذا كانت الفلاتر صحيحة
-        await update.message.reply_text(MESSAGES["invalid_send_location_choice"]) 
-        return ASKING_FOR_CAPTION
+        await update.message.reply_text(MESSAGES["invalid_send_location_choice"]) # رسالة خطأ للخيار غير الصالح
+        return ASKING_FOR_CAPTION # البقاء في نفس الحالة لإعادة المحاولة
 
 
 async def receive_manual_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -281,7 +284,8 @@ async def ask_for_send_location(update: Update, context: ContextTypes.DEFAULT_TY
     تطلب من المستخدم اختيار مكان إرسال الألبوم.
     """
     user_chat_id = update.effective_chat.id
-    await delete_messages_from_queue(context, user_chat_id) # حذف رسائل التعليق
+    # حذف كل الرسائل المعلقة للحذف في القائمة messages_to_delete
+    await delete_messages_from_queue(context, user_chat_id) 
 
 
     keyboard = [
@@ -298,8 +302,8 @@ async def ask_for_send_location(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
-    context.user_data["messages_to_delete"].append(prompt_msg.message_id)
-
+    context.user_data["messages_to_delete"].append(prompt_msg.message_id) # يتم حذف هذه الرسالة بواسطة delete_messages_from_queue في الخطوة التالية
+    
     return ASKING_FOR_SEND_LOCATION
 
 async def handle_send_location_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -310,19 +314,20 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     user_caption = context.user_data.get("current_album_caption", "")
     user_chat_id = update.effective_chat.id
     
-    await delete_messages_from_queue(context, user_chat_id)
+    # حذف كل رسائل المطالبة بالأزرار وما شابهها
+    await delete_messages_from_queue(context, user_chat_id) 
 
     send_chat_id = None
     if send_location_choice == MESSAGES["send_to_channel_button"]:
-        send_chat_id = os.getenv("CHANNEL_ID")
-        if not send_chat_id:
+        send_chat_id_env = os.getenv("CHANNEL_ID") # Get as string
+        if not send_chat_id_env:
             error_msg = await update.message.reply_text(MESSAGES["channel_id_missing"])
             context.user_data["messages_to_delete"].append(error_msg.message_id)
-            return ASKING_FOR_SEND_LOCATION # البقاء في نفس الحالة لطلب مكان الإرسال مجددا
-        try: # Try converting to int
-            send_chat_id = int(send_chat_id)
+            return ASKING_FOR_SEND_LOCATION # Stay in same state for re-prompt
+        try: 
+            send_chat_id = int(send_chat_id_env) # Convert to int for Telegram API
         except ValueError:
-            error_msg = await update.message.reply_text("❌ معرف القناة (CHANNEL_ID) غير صحيح في إعدادات البوت.")
+            error_msg = await update.message.reply_text("❌ معرف القناة (CHANNEL_ID) في إعدادات البوت ليس رقماً صحيحاً.")
             context.user_data["messages_to_delete"].append(error_msg.message_id)
             return ASKING_FOR_SEND_LOCATION
 
@@ -333,13 +338,14 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
         context.user_data["messages_to_delete"].append(error_msg.message_id)
         return ASKING_FOR_SEND_LOCATION
 
-    # إرسال رسالة "جاري إنشاء الألبوم" وتخزين معرفها للتعديل
+    # إرسال رسالة "جاري إنشاء الألبوم" وتخزين معرفها للتعديل ولحذفها لاحقاً
     progress_msg = await update.message.reply_text(
         MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums="؟", time_remaining_str="...") ,
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=ReplyKeyboardRemove() 
     )
-    context.user_data["progress_message_id"] = progress_msg.message_id
+    context.user_data["progress_message_id"] = progress_msg.message_id # Save specific ID for editing/later deletion
+    context.user_data["temp_messages_to_clean"].append(progress_msg.message_id) # Also add to cleanup list
 
     # تشغيل مهمة إنشاء الألبوم
     await execute_album_creation(update, context, user_caption, send_chat_id)
@@ -347,41 +353,56 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
     # بعد الانتهاء من execute_album_creation
     final_feedback_msg = await update.message.reply_text(
         MESSAGES["album_creation_success"], 
-        reply_markup=ReplyKeyboardRemove() # هذه مهمة لضمان ألا تحذف هذه الرسالة لوحة المفاتيح الرئيسية لاحقًا
+        reply_markup=ReplyKeyboardRemove() 
     )
+    context.user_data["temp_messages_to_clean"].append(final_feedback_msg.message_id) # Add final feedback to cleanup list
 
+
+    # إرسال لوحة المفاتيح الرئيسية الدائمة
     main_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
         [KeyboardButton(MESSAGES["keyboard_clear"])]
     ]
     reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-    await update.message.reply_text(
+    permanent_prompt_msg = await update.message.reply_text(
         MESSAGES["success_message_permanent_prompt"], 
         reply_markup=reply_markup_main
     )
 
+    # البدء بمهمة خلفية لحذف جميع الرسائل المؤقتة بعد تأخير (5 ثواني)
     context.application.create_task(
-        delete_temp_message_after_delay(
+        clear_all_temp_messages_after_delay(
             bot=context.bot,
             chat_id=user_chat_id,
-            message_id=final_feedback_msg.message_id, 
-            delay=3 
+            delay=5, # 5 ثواني كما طلبت
+            context_user_data=context.user_data # pass user_data to access temp_messages_to_clean
         )
     )
 
+    # مسح البيانات ذات الصلة بمسار الألبوم الحالي من user_data
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
+    context.user_data.pop("progress_message_id", None) # Clear as it's now handled by temp_messages_to_clean
 
     return ConversationHandler.END
 
-async def delete_temp_message_after_delay(bot, chat_id, message_id, delay):
-    """حذف رسالة مؤقتة بعد تأخير زمني."""
+async def clear_all_temp_messages_after_delay(bot, chat_id, delay, context_user_data):
+    """
+    حذف كل الرسائل المؤقتة المخزنة في temp_messages_to_clean بعد تأخير زمني.
+    """
     await asyncio.sleep(delay)
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-        logger.debug(f"Deleted temporary message with ID: {message_id} after {delay} seconds.")
-    except Exception as e:
-        logger.debug(f"Could not delete temporary message {message_id} in chat {chat_id}: {e}")
+    
+    if "temp_messages_to_clean" in context_user_data:
+        messages_to_delete_ids = list(context_user_data["temp_messages_to_clean"])
+        for msg_id in messages_to_delete_ids:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                logger.debug(f"Deleted temporary message with ID: {msg_id} after delay.")
+            except Exception as e:
+                logger.debug(f"Could not delete temporary message {msg_id} in chat {chat_id} after delay: {e}")
+        context_user_data["temp_messages_to_clean"].clear()
+    else:
+        logger.warning("temp_messages_to_clean not found in user_data during delayed deletion.")
 
 
 async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -389,11 +410,18 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     يلغي محادثة التعليق ويعيد لوحة المفاتيح الرئيسية.
     """
     chat_id = update.effective_chat.id
+    
+    # حذف جميع الرسائل التي يطلب البوت حذفها فوراً (prompt, manual prompt, etc.)
     await delete_messages_from_queue(context, chat_id)
     
+    # محاولة حذف أي رسائل مؤقتة أخرى قد تكون ما زالت معلقة
+    await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data) # delay 0 for immediate clear
+    context.user_data["temp_messages_to_clean"].clear() # Ensure list is empty
+
     context.user_data["media_queue"] = []
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
+    context.user_data.pop("progress_message_id", None) # Ensure this is also cleared
 
     main_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
@@ -421,7 +449,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     num_albums = math.ceil(total_media / max_items_per_album)
 
     base_chunk_size = total_media // num_albums
-    remainder = total_media % num_albums # Corrected calculation for remainder
+    remainder = total_media % num_albums 
 
     chunk_sizes = []
     for i in range(num_albums):
@@ -512,28 +540,6 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["media_queue"] = []
 
 
-# إعادة ضبط قائمة الوسائط
-async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await initialize_user_data(context)
-    chat_id = update.effective_chat.id
-    
-    await delete_messages_from_queue(context, chat_id) 
-
-    context.user_data["media_queue"] = []
-    context.user_data.pop("current_album_caption", None)
-    context.user_data.pop("caption_status_message", None)
-
-    main_keyboard = [
-        [KeyboardButton(MESSAGES["keyboard_done"])],
-        [KeyboardButton(MESSAGES["keyboard_clear"])]
-    ]
-    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-    await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=reply_markup_main)
-    
-    return ConversationHandler.END
-
-
 # تشغيل البوت
 def main() -> None:
     token = os.getenv("BOT_TOKEN")
@@ -547,6 +553,7 @@ def main() -> None:
     if not channel_id_env:
         logger.warning("CHANNEL_ID environment variable is not set. Channel posting feature will not work.")
     else:
+        # Simple validation for CHANNEL_ID
         if not (channel_id_env.startswith("-100") and channel_id_env[1:].isdigit()):
             logger.error(f"Invalid CHANNEL_ID format: {channel_id_env}. It should start with '-100' followed by digits. Channel posting will not work.")
 
