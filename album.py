@@ -24,13 +24,11 @@ from telegram.ext import (
 from telegram.error import RetryAfter, TelegramError
 from telegram.constants import ParseMode
 
-
 # إعداد التسجيل
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - "%(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO # تم تصحيح علامات الاقتباس هنا
 )
 logger = logging.getLogger(__name__)
-
 # الحالات للمحادثة
 ASKING_FOR_CAPTION = 1
 # ASKING_FOR_MANUAL_CAPTION = 2 # لم تعد هناك حاجة لهذه الحالة بشكل منفصل
