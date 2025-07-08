@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
     ConversationHandler,
 )
-from telegram.error import RetryAfter, TelegramError # Keep TelegramError for broader error handling
+from telegram.error import RetryAfter, TelegramError
 from telegram.constants import ParseMode
 
 
@@ -70,7 +70,7 @@ MESSAGES = {
     "ask_send_location": "أين تود إرسال الألبوم؟",
     "send_to_channel_button": "القناة 📢",
     "send_to_chat_button": "المحادثة معي 👤",
-    "channel_id_missing": "❌ لم يتم ضبط معرف القناة (CHANNEL_ID) في بيئة البوت. لا يمكن الإرسال للقناة.",
+    "channel_id_missing": "❌ لم يتم ضبط معرف القناة (CHANNEL_ID) في بيئة البوت. لا يمكن الإرسال للقناة. الرجاء الاتصال بالمطور.",
     "invalid_send_location_choice": "خيار غير صالح. الرجاء الاختيار من الأزرار.",
     "album_action_confirm": "{caption_status}{ask_location_prompt}", # Combine caption status and location prompt
     "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه." # الرسالة الجديدة الدائمة
@@ -189,8 +189,8 @@ async def send_media_group_with_backoff(context: ContextTypes.DEFAULT_TYPE, chat
             logger.error("TelegramError sending album chunk %d on attempt %d: %s",
                          chunk_index + 1, attempt + 1, e)
             error_message = MESSAGES["album_creation_error"]
-            if "Forbidden: bot was blocked by the user" in str(e) or "chat not found" in str(e).lower() or "bot is not a member" in str(e).lower() or "not a member of the channel" in str(e).lower():
-                error_message = "❌ فشل إرسال الألبوم: البوت ليس لديه صلاحية الإرسال لهذه القناة/الدردشة أو غير موجود فيها. الرجاء التأكد من الأذونات."
+            if "Forbidden: bot was blocked by the user" in str(e) or "chat not found" in str(e).lower() or "bot is not a member" in str(e).lower() or "not a member of the channel" in str(e).lower() or "not enough rights" in str(e).lower() or "need to be admin" in str(e).lower():
+                error_message = "❌ فشل إرسال الألبوم: البوت ليس لديه صلاحية الإرسال لهذه القناة/الدردشة أو غير موجود فيها. الرجاء التأكد من الأذونات الصحيحة (نشر، تثبيت)."
             await context.bot.send_message(chat_id=user_chat_id, text=error_message)
             return False, None
         except Exception as e:
@@ -210,7 +210,7 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
     """
     await initialize_user_data(context)
     user_chat_id = update.effective_chat.id
-    await delete_messages_from_queue(context, user_chat_id)
+    await delete_messages_from_queue(context, user_chat_id) # حذف رسائل من المحادثة السابقة
 
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
@@ -254,16 +254,14 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data["caption_status_message"] = caption_status_message
         return await ask_for_send_location(update, context)
     else:
-        # إذا لم يكن زرًا من الأزرار المعروضة، هذا يعني إدخال غير صالح في هذه المرحلة.
-        # أو يمكن تفسيره كـ "تعليق يدوي كتبه المستخدم دون الضغط على زر إدخال يدوي"
-        # حسب التدفق المقترح، يجب على المستخدم الضغط على الزر أولاً
-        await update.message.reply_text(MESSAGES["invalid_send_location_choice"]) # يمكن استخدام رسالة "خيار تعليق غير صالح"
-        return ASKING_FOR_CAPTION # البقاء في نفس الحالة لإعادة المحاولة
+        # هذا لن يحدث إذا كانت الفلاتر صحيحة
+        await update.message.reply_text(MESSAGES["invalid_send_location_choice"]) 
+        return ASKING_FOR_CAPTION
 
 
 async def receive_manual_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    الخطوة الجديدة: تستقبل التعليق اليدوي بعد أن اختار المستخدم زر "إدخال تعليق يدوي".
+    تستقبل التعليق اليدوي بعد أن اختار المستخدم زر "إدخال تعليق يدوي".
     """
     user_caption = update.message.text
     
@@ -284,6 +282,7 @@ async def ask_for_send_location(update: Update, context: ContextTypes.DEFAULT_TY
     """
     user_chat_id = update.effective_chat.id
     await delete_messages_from_queue(context, user_chat_id) # حذف رسائل التعليق
+
 
     keyboard = [
         [KeyboardButton(MESSAGES["send_to_channel_button"])],
@@ -320,6 +319,13 @@ async def handle_send_location_choice(update: Update, context: ContextTypes.DEFA
             error_msg = await update.message.reply_text(MESSAGES["channel_id_missing"])
             context.user_data["messages_to_delete"].append(error_msg.message_id)
             return ASKING_FOR_SEND_LOCATION # البقاء في نفس الحالة لطلب مكان الإرسال مجددا
+        try: # Try converting to int
+            send_chat_id = int(send_chat_id)
+        except ValueError:
+            error_msg = await update.message.reply_text("❌ معرف القناة (CHANNEL_ID) غير صحيح في إعدادات البوت.")
+            context.user_data["messages_to_delete"].append(error_msg.message_id)
+            return ASKING_FOR_SEND_LOCATION
+
     elif send_location_choice == MESSAGES["send_to_chat_button"]:
         send_chat_id = user_chat_id
     else:
@@ -415,7 +421,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     num_albums = math.ceil(total_media / max_items_per_album)
 
     base_chunk_size = total_media // num_albums
-    remainder = total_albums % num_albums # This line was incorrect (should be total_media % num_albums)
+    remainder = total_media % num_albums # Corrected calculation for remainder
 
     chunk_sizes = []
     for i in range(num_albums):
@@ -458,6 +464,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
 
         logger.info(f"تم إرسال الدفعة {index + 1} إلى {target_chat_id}.")
 
+        # Check if CHANNEL_ID is set in environment and matches target_chat_id (string comparison for safety)
         if str(target_chat_id) == os.getenv("CHANNEL_ID") and sent_messages and index == 0:
             try:
                 await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
@@ -465,7 +472,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
             except Exception as pin_err:
                 logger.warning(f"فشل في تثبيت الرسالة في القناة: {pin_err}. يرجى التأكد من أن البوت مشرف ولديه أذن التثبيت.")
                 if user_chat_id != target_chat_id: 
-                    await context.bot.send_message(chat_id=user_chat_id, text="⚠️ تم إرسال الألبوم للقناة ولكن تعذر تثبيت الرسالة الأولى. يرجى التأكد من أذونات البوت.")
+                    await context.bot.send_message(chat_id=user_chat_id, text="⚠️ تم إرسال الألبوم للقناة ولكن تعذر تثبيت الرسالة الأولى. يرجى التأكد من أذونات البوت (نشر وتثبيت).")
 
         processed_albums += 1
         
@@ -505,6 +512,28 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["media_queue"] = []
 
 
+# إعادة ضبط قائمة الوسائط
+async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await initialize_user_data(context)
+    chat_id = update.effective_chat.id
+    
+    await delete_messages_from_queue(context, chat_id) 
+
+    context.user_data["media_queue"] = []
+    context.user_data.pop("current_album_caption", None)
+    context.user_data.pop("caption_status_message", None)
+
+    main_keyboard = [
+        [KeyboardButton(MESSAGES["keyboard_done"])],
+        [KeyboardButton(MESSAGES["keyboard_clear"])]
+    ]
+    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
+
+    await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=reply_markup_main)
+    
+    return ConversationHandler.END
+
+
 # تشغيل البوت
 def main() -> None:
     token = os.getenv("BOT_TOKEN")
@@ -512,16 +541,14 @@ def main() -> None:
         logger.error("BOT_TOKEN not set in environment variables. Please set it.")
         return
 
-    # CHANNEL_ID environment variable is now mandatory if you want to use the channel feature
+    #CHANNEL_ID should be set in your environment variables for channel posting to work.
+    # e.g., export CHANNEL_ID="-1001234567890" in your shell
     channel_id_env = os.getenv("CHANNEL_ID")
     if not channel_id_env:
         logger.warning("CHANNEL_ID environment variable is not set. Channel posting feature will not work.")
     else:
-        # Simple validation for CHANNEL_ID
         if not (channel_id_env.startswith("-100") and channel_id_env[1:].isdigit()):
-            logger.error(f"Invalid CHANNEL_ID format: {channel_id_env}. It should start with '-100' followed by digits.")
-            # Optionally exit or set channel_id_env to None if invalid
-            # return
+            logger.error(f"Invalid CHANNEL_ID format: {channel_id_env}. It should start with '-100' followed by digits. Channel posting will not work.")
 
 
     application = Application.builder().token(token).build()
@@ -532,11 +559,11 @@ def main() -> None:
         ],
         states={
             ASKING_FOR_CAPTION: [
-                # فلترة زر "إدخال تعليق يدوي" أولاً للانتقال للحالة المخصصة
+                # إذا اختار زر "إدخال تعليق يدوي" -> اطلب التعليق ثم انتقل لـ ASKING_FOR_MANUAL_CAPTION
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['album_comment_option_manual'])}$"), handle_caption_choice),
-                # فلترة الأزرار الجاهزة
+                # إذا اختار أي زر جاهز -> عالجه مباشرة وانتقل لـ ASKING_FOR_SEND_LOCATION
                 MessageHandler(filters.TEXT & filters.Regex(f"^{'|'.join(map(re.escape, PREDEFINED_CAPTION_BUTTONS))}$"), handle_caption_choice),
-                # أي شيء آخر هو إدخال غير صالح في هذه المرحلة
+                # أي شيء آخر في هذه الحالة (ليس زرًا) يعتبر إدخالًا غير صالح ويطلب إعادة المحاولة
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text(MESSAGES["invalid_send_location_choice"])),
             ],
             ASKING_FOR_MANUAL_CAPTION: [ # حالة جديدة لطلب التعليق اليدوي الفعلي
@@ -544,17 +571,19 @@ def main() -> None:
             ],
             ASKING_FOR_SEND_LOCATION: [
                 MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['send_to_channel_button'])}$|^^{re.escape(MESSAGES['send_to_chat_button'])}$") & ~filters.COMMAND, handle_send_location_choice),
+                # إذا أدخل المستخدم شيئًا آخر غير الأزرار في هذه الحالة -> رسالة خطأ والبقاء في نفس الحالة
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.effective_message.reply_text(MESSAGES["invalid_send_location_choice"])),
             ],
         },
         fallbacks=[
+            # هذه الـ Fallbacks تنظف وتعود للقائمة الرئيسية من أي حالة
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, cancel_album_creation),
             CommandHandler("cancel", cancel_album_creation),
             CommandHandler("start", cancel_album_creation), 
             CommandHandler("help", cancel_album_creation), 
             CommandHandler("settings", cancel_album_creation), 
             CommandHandler("source", cancel_album_creation),
-            # هذا Fallback سيلتقط أي رسالة أخرى غير متوقعة وينهي المحادثة
+            # هذا Fallback الأخير يلتقط أي رسائل نصية أو غير نصية أخرى أثناء المحادثة ويؤدي إلى إلغاء نظيف
             MessageHandler(filters.ALL & ~filters.COMMAND, cancel_album_creation) 
         ]
     )
