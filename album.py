@@ -13,21 +13,20 @@ from telegram import (
     InputMediaPhoto,
     InputMediaVideo,
     KeyboardButton,
-    ReplyKeyboardMarkup, # <--- تأكد من وجود هذا الاستيراد هنا
+    ReplyKeyboardMarkup,
 )
+from telegram.constants import ParseMode
+from telegram.error import RetryAfter, TelegramError, BadRequest
+
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,  # استيراد ApplicationBuilder فقط (ليس Application)
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ConversationHandler,
     ContextTypes,
     filters,
-    ConversationHandler,
 )
-from telegram.error import RetryAfter, TelegramError, BadRequest 
-from telegram.constants import ParseMode
-from telegram.ext import ContextTypes, Defaults
-from telegram.ext import ApplicationBuilder
 
 
 # إعداد التسجيل
@@ -680,24 +679,44 @@ def main() -> None:
         if not (channel_id_env.startswith("-100") and channel_id_env[1:].isdigit()):
             logger.error(f"Invalid CHANNEL_ID format: {channel_id_env}. It should start with '-100' followed by digits. Channel posting will not work.")
 
-    # ✅ هذا يضمن أن user_data و chat_data يتم تهيئتها دائمًا
-    application = ApplicationBuilder().token(token).build()
+    # ✅ دالة لضمان user_data ليس None
+    async def post_init_func(application):
+        logger.info("Application post-init hook executed. Ensuring context.user_data will be initialized properly.")
 
-    # إصلاح دائم: نجعل user_data dict لكل مستخدم، إذا لم يكن موجود مسبقًا
-    @application.post_init
-    async def ensure_user_data(app):
-        async def init_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            if context.user_data is None:
-                context.user_data = {}
-        app.add_handler(MessageHandler(filters.ALL, init_user_data), group=-1)
+    # ✅ بناء الـ Application مع post_init hook
+    application = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(post_init_func)  # هذه الطريقة الصحيحة
+        .build()
+    )
 
-    # باقي الهاندلرز كما هم دون تغيير
+    # ✅ إصلاح دائم: ضمان user_data dict
+    def ensure_user_data_middleware(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if context.user_data is None:
+            context.user_data = {}
+
+    application.add_handler(MessageHandler(filters.ALL, ensure_user_data_middleware), group=-1)
+
+    # إضافة كل الهاندلرز كالمعتاد
     caption_conversation_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_done'])}$") & ~filters.COMMAND, start_album_creation_process)
         ],
-        states={ ... },  # كما هو
-        fallbacks=[ ... ]  # كما هو
+        states={  # حالتك هنا كما كانت
+            ASKING_FOR_CAPTION: [...],
+            ASKING_FOR_MANUAL_CAPTION: [...],
+            ASKING_FOR_SEND_LOCATION: [...],
+        },
+        fallbacks=[
+            MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, reset_album),
+            CommandHandler("cancel", cancel_album_creation),
+            CommandHandler("start", cancel_album_creation),
+            CommandHandler("help", cancel_album_creation),
+            CommandHandler("settings", cancel_album_creation),
+            CommandHandler("source", cancel_album_creation),
+            MessageHandler(filters.ALL & ~filters.COMMAND, cancel_album_creation)
+        ]
     )
 
     application.add_handler(CommandHandler("start", start))
@@ -711,6 +730,7 @@ def main() -> None:
 
     logger.info("Bot started polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 
 if __name__ == '__main__':
