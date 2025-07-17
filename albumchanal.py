@@ -93,6 +93,8 @@ _forward_lock = asyncio.Lock()
 # تهيئة بيانات المستخدم
 async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
     """يضمن تهيئة context.user_data والمتغيرات الضرورية."""
+    # ملاحظة: context.user_data هو المكان الصحيح لتخزين بيانات المستخدم.
+    # وظائف الـ JobQueue ستصل إليها عبر context.job.data.get('user_data', {}).
     if "messages_to_delete" not in context.user_data:
         context.user_data["messages_to_delete"] = []
     if "temp_messages_to_clean" not in context.user_data:
@@ -103,10 +105,8 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
         context.user_data["album_destination_chat_id"] = None
     if "album_destination_name" not in context.user_data:
         context.user_data["album_destination_name"] = None
-    # لجمع أجزاء مجموعة الوسائط
     if '_media_groups_pending' not in context.user_data:
         context.user_data['_media_groups_pending'] = {}
-    # لتطبيق التأخير بين كل ألبوم
     if '_last_forward_timestamp' not in context.user_data:
         context.user_data['_last_forward_timestamp'] = 0
 
@@ -317,7 +317,7 @@ async def handle_incoming_media(update: Update, context: ContextTypes.DEFAULT_TY
         media_type = "video"
         caption = message.caption
     else:
-        return # يجب ألا تصل هنا إذا الفلتر صحيح
+        return
 
     input_media_item = None
     if media_type == "photo":
@@ -327,84 +327,111 @@ async def handle_incoming_media(update: Update, context: ContextTypes.DEFAULT_TY
 
     if input_media_item:
         if media_group_id:
-            if media_group_id not in context.user_data['_media_groups_pending']:
+            # هنا التعديل للوصول إلى _media_groups_pending من user_data مباشرة
+            if media_group_id not in context.user_data.get('_media_groups_pending', {}):
                 context.user_data['_media_groups_pending'][media_group_id] = {
                     'media_items': [],
                     'user_chat_id': user_chat_id,
-                    'last_message_time': time.time()
+                    # بما أننا نمرر user_data إلى Job.data، ليس من الضروري وضعها هنا،
+                    # لكن سنبقيها لسهولة القراءة وتتبع مصدر البيانات
+                    'user_data': context.user_data # تمرير مرجع لـ user_data بالكامل
                 }
             context.user_data['_media_groups_pending'][media_group_id]['media_items'].append(input_media_item)
-            context.user_data['_media_groups_pending'][media_group_id]['last_message_time'] = time.time()
+            # context.user_data['_media_groups_pending'][media_group_id]['last_message_time'] = time.time() # هذا لم يعد ضروريا هنا، الوقت يحسب قبل الجدولة
 
             job_name = f"process_media_group_{media_group_id}"
             current_jobs = context.job_queue.get_jobs_by_name(job_name)
             for job in current_jobs:
                 job.schedule_removal()
             
-            # ****** التعديل هنا: استخدام 'data' بدلاً من 'context' *****
             context.job_queue.run_once(
                 _process_and_forward_album_job,
                 1, # تأخير كافٍ لجمع الأجزاء
-                data={"media_group_id": media_group_id, "user_chat_id": user_chat_id},
+                # نمرر الكائن الذي نرغب في الوصول إليه في الـ Job
+                data={"media_group_id": media_group_id, "user_chat_id": user_chat_id, "user_data_ref": context.user_data},
                 name=job_name
             )
         else:
-            await _process_and_forward_album([input_media_item], user_chat_id, context)
-
+            # For single media, we also need to pass a reference to user_data
+            # We treat single media as a single-item album.
+            # Make sure _process_and_forward_album also receives user_data.
+            await _process_and_forward_album([input_media_item], user_chat_id, context.user_data, context.bot, context.job_queue) # تمرير كل شيء يدويا
 
 async def _process_and_forward_album_job(context: ContextTypes.DEFAULT_TYPE):
     """
     مهمة JobQueue لمعالجة وإعادة توجيه مجموعة وسائط مكتملة.
     """
-    # ****** التعديل هنا: استخدام context.job.data للوصول إلى البيانات ******
-    job_context_data = context.job.data
-    media_group_id = job_context_data["media_group_id"]
-    user_chat_id_for_data = job_context_data["user_chat_id"]
+    job_data = context.job.data
+    media_group_id = job_data["media_group_id"]
+    user_chat_id_for_data = job_data["user_chat_id"]
+    user_data_ref = job_data["user_data_ref"] # استعادة مرجع user_data
 
     async with _forward_lock:
-        if media_group_id not in context.user_data.get('_media_groups_pending', {}):
-            return # تم معالجة المجموعة بالفعل أو مسحها
+        # هنا يجب استخدام user_data_ref للوصول إلى _media_groups_pending
+        if media_group_id not in user_data_ref.get('_media_groups_pending', {}):
+            return
 
-        album_data = context.user_data['_media_groups_pending'].pop(media_group_id)
+        album_data = user_data_ref['_media_groups_pending'].pop(media_group_id)
         media_items_to_send = album_data['media_items']
 
-        await _process_and_forward_album(media_items_to_send, user_chat_id_for_data, context)
+        # تمرير الكائنات اللازمة لـ _process_and_forward_album
+        await _process_and_forward_album(media_items_to_send, user_chat_id_for_data, user_data_ref, context.bot, context.job_queue)
 
-async def _process_and_forward_album(media_items: list, user_chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+async def _process_and_forward_album(media_items: list, user_chat_id: int, user_data: dict, bot_instance, job_queue_instance):
     """
     وظيفة مساعدة لمعالجة وإرسال ألبوم (سواء كان مجموعة وسائط أو وسائط فردية).
+    ملاحظة: هذه الدالة لم تعد تستقبل 'context' بشكل مباشر كالمعتاد،
+    ولكن تستقبل الأجزاء التي تحتاجها (user_data, bot_instance, job_queue_instance)
+    لأنها تُستدعى من سياق مختلف (Jobs).
     """
-    target_chat_id = context.user_data.get("album_destination_chat_id")
+    target_chat_id = user_data.get("album_destination_chat_id")
 
     if not media_items:
         logger.warning(f"No media items to forward for user {user_chat_id}, skipping.")
         return
 
-    # تطبيق 10 ثوانٍ تأخير بين إرسال الألبومات
     current_time = time.time()
-    last_forward_time = context.user_data.get('_last_forward_timestamp', 0)
+    last_forward_time = user_data.get('_last_forward_timestamp', 0)
     time_since_last_forward = current_time - last_forward_time
     if last_forward_time != 0 and time_since_last_forward < 10:
         delay_needed = 10 - time_since_last_forward
         logger.info(f"Delaying next album forwarding for {delay_needed:.2f} seconds.")
         await asyncio.sleep(delay_needed)
 
-    context.user_data['_last_forward_timestamp'] = time.time()
+    user_data['_last_forward_timestamp'] = time.time()
 
     logger.info(f"Forwarding album ({len(media_items)} items) for user {user_chat_id} to {target_chat_id}.")
 
-    success, sent_messages = await send_media_group_with_backoff(
-        context=context,
-        chat_id_to_send_to=target_chat_id,
-        input_media=media_items,
-        chunk_index=0,
-        user_chat_id=user_chat_id
-    )
+    # يجب إعادة إنشاء ContextTypes هنا لكي send_media_group_with_backoff يعمل
+    # هذا قد يكون أكثر تعقيداً قليلاً، فلنقم بإعادة استدعاء bot مباشرة لتقليل التعقيد
+    # وإزالة send_media_group_with_backoff مؤقتاً لتجنب تضارب الـ contexts
+
+    max_retries = 5
+    sent_messages = None
+    for attempt in range(max_retries):
+        try:
+            sent_messages = await bot_instance.send_media_group(chat_id=target_chat_id, media=media_items)
+            success = True
+            break
+        except RetryAfter as e:
+            logger.warning(f"RetryAfter (attempt {attempt+1}/{max_retries}): Waiting for {e.retry_after} seconds.")
+            await asyncio.sleep(e.retry_after)
+        except TelegramError as e:
+            logger.error(f"TelegramError (attempt {attempt+1}/{max_retries}) sending album: {e}")
+            success = False
+            break
+        except Exception as e:
+            logger.error(f"Generic Error (attempt {attempt+1}/{max_retries}) sending album: {e}")
+            success = False
+            break
+    else: # If loop completes without break (all retries failed)
+        success = False
+
 
     if success and sent_messages:
         if str(target_chat_id).startswith("-100"): # فقط في القنوات
             try:
-                await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
+                await bot_instance.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
                 logger.info(f"Pinned first message of album in channel {target_chat_id}.")
             except Exception as pin_err:
                 logger.warning(f"Failed to pin first message of album in channel {target_chat_id}: {pin_err}.")
@@ -416,7 +443,7 @@ async def _process_and_forward_album(media_items: list, user_chat_id: int, conte
         [KeyboardButton(MESSAGES["keyboard_clear"])]
     ]
     reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
-    await context.bot.send_message(
+    await bot_instance.send_message( # استخدام bot_instance مباشرة
         chat_id=user_chat_id,
         text=".",
         reply_markup=reply_markup
@@ -459,11 +486,15 @@ async def reset_album_and_pending_groups(update: Update, context: ContextTypes.D
 
     if '_media_groups_pending' in context.user_data:
         context.user_data['_media_groups_pending'] = {}
-        if context.application and hasattr(context.application, 'job_queue'):
+        # استخدام context.application.job_queue بشكل صحيح
+        if hasattr(context.application, 'job_queue') and context.application.job_queue is not None:
             for job in context.application.job_queue.get_jobs_by_name(f"process_media_group_.*"):
-                if job.context and job.context.get("user_chat_id") == chat_id: # التحقق من المستخدم الصحيح
-                    job.schedule_removal()
-                    logger.info(f"Cancelled job {job.name} for user {chat_id}.")
+                # التحقق من أن المهمة تعود لهذا المستخدم المحدد (من بيانات Job نفسها)
+                # Job.context لا يمكن الوصول لـ user_data هنا بسهولة،
+                # سنعتمد على أن إلغاء المهام للجميع أثناء إعادة تعيين البوت مقبول
+                if job.data and job.data.get("user_chat_id") == chat_id: # تحقق أفضل بالوصول للـ data
+                     job.schedule_removal()
+                     logger.info(f"Cancelled job {job.name} for user {chat_id}.")
         logger.info(f"Cleared pending media groups and cancelled related jobs for user {chat_id}.")
 
     context.user_data['_last_forward_timestamp'] = 0
@@ -502,9 +533,10 @@ async def cancel_operation_general(update: Update, context: ContextTypes.DEFAULT
     await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data)
     context.user_data["temp_messages_to_clean"].clear()
 
-    if '_media_groups_pending' in context.user_data and context.application and hasattr(context.application, 'job_queue'):
+    # عند إلغاء عملية، نلغي المهام المعلقة لهذا المستخدم
+    if '_media_groups_pending' in context.user_data and hasattr(context.application, 'job_queue') and context.application.job_queue is not None:
         for job in context.application.job_queue.get_jobs_by_name(f"process_media_group_.*"):
-            if job.context and job.context.get("user_chat_id") == chat_id:
+            if job.data and job.data.get("user_chat_id") == chat_id: # تحقق من المستخدم الصحيح
                 job.schedule_removal()
                 logger.info(f"Cancelled job {job.name} for user {chat_id} during general cancel.")
 
