@@ -24,7 +24,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
     ConversationHandler,
-    JobQueue # تأكد من استيراد JobQueue هنا
+    JobQueue
 )
 from telegram.error import RetryAfter, TelegramError, BadRequest
 from telegram.constants import ParseMode
@@ -71,8 +71,8 @@ MESSAGES = {
     "keyboard_clear": "إعادة تعيين البوت",
     "keyboard_change_destination": "تغيير وجهة الألبوم 🔄",
     "queue_cleared": "تم مسح قائمة التحويلات المعلقة.",
-    "album_forward_started": "⏳ تم استقبال الألبوم وجاري التحضير لإعادة التوجيه...", # لم نستخدمها الآن، ولكن بقاؤها ليس ضاراً
-    "progress_update": "جاري إرسال الألبوم: *{processed_albums}/{total_albums}*\nالوقت المتبقي المقدر: *{time_remaining_str}*.", # لم نستخدمها الآن
+    "album_forward_started": "⏳ تم استقبال الألبوم وجاري التحضير لإعادة التوجيه...",
+    "progress_update": "جاري إرسال الألبوم: *{processed_albums}/{total_albums}*\nالوقت المتبقي المقدر: *{time_remaining_str}*.",
     "cancel_operation": "تم إلغاء العملية.",
     "ask_send_location": "أين تود إرسال الألبومات؟",
     "send_to_channel_button": "القناة 📢",
@@ -321,7 +321,6 @@ async def handle_incoming_media(update: Update, context: ContextTypes.DEFAULT_TY
 
     input_media_item = None
     if media_type == "photo":
-        # للحفاظ على التعليق الأصلي من الألبوم
         input_media_item = InputMediaPhoto(media=file_id, caption=caption, parse_mode=ParseMode.HTML)
     elif media_type == "video":
         input_media_item = InputMediaVideo(media=file_id, caption=caption, parse_mode=ParseMode.HTML)
@@ -332,22 +331,24 @@ async def handle_incoming_media(update: Update, context: ContextTypes.DEFAULT_TY
                 context.user_data['_media_groups_pending'][media_group_id] = {
                     'media_items': [],
                     'user_chat_id': user_chat_id,
-                    'last_message_time': time.time() # لتحديد متى وصل آخر جزء
+                    'last_message_time': time.time()
                 }
             context.user_data['_media_groups_pending'][media_group_id]['media_items'].append(input_media_item)
             context.user_data['_media_groups_pending'][media_group_id]['last_message_time'] = time.time()
 
-            # جدولة مهمة لمعالجة المجموعة
             job_name = f"process_media_group_{media_group_id}"
             current_jobs = context.job_queue.get_jobs_by_name(job_name)
             for job in current_jobs:
                 job.schedule_removal()
-            # التأخير يعتمد على الوقت اللازم لوصول جميع أجزاء الألبوم
-            context.job_queue.run_once(_process_and_forward_album_job, 1, # تأخير كافٍ لجمع الأجزاء
-                                       context={"media_group_id": media_group_id, "user_chat_id": user_chat_id},
-                                       name=job_name)
+            
+            # ****** التعديل هنا: استخدام 'data' بدلاً من 'context' *****
+            context.job_queue.run_once(
+                _process_and_forward_album_job,
+                1, # تأخير كافٍ لجمع الأجزاء
+                data={"media_group_id": media_group_id, "user_chat_id": user_chat_id},
+                name=job_name
+            )
         else:
-            # وسائط مفردة، تُعامل كألبوم من عنصر واحد
             await _process_and_forward_album([input_media_item], user_chat_id, context)
 
 
@@ -355,7 +356,8 @@ async def _process_and_forward_album_job(context: ContextTypes.DEFAULT_TYPE):
     """
     مهمة JobQueue لمعالجة وإعادة توجيه مجموعة وسائط مكتملة.
     """
-    job_context_data = context.job.context
+    # ****** التعديل هنا: استخدام context.job.data للوصول إلى البيانات ******
+    job_context_data = context.job.data
     media_group_id = job_context_data["media_group_id"]
     user_chat_id_for_data = job_context_data["user_chat_id"]
 
@@ -382,7 +384,7 @@ async def _process_and_forward_album(media_items: list, user_chat_id: int, conte
     current_time = time.time()
     last_forward_time = context.user_data.get('_last_forward_timestamp', 0)
     time_since_last_forward = current_time - last_forward_time
-    if last_forward_time != 0 and time_since_last_forward < 10: # لا نطبق تأخير إذا كانت هذه أول عملية تحويل
+    if last_forward_time != 0 and time_since_last_forward < 10:
         delay_needed = 10 - time_since_last_forward
         logger.info(f"Delaying next album forwarding for {delay_needed:.2f} seconds.")
         await asyncio.sleep(delay_needed)
@@ -409,7 +411,6 @@ async def _process_and_forward_album(media_items: list, user_chat_id: int, conte
     else:
         logger.error(f"Failed to forward album for user {user_chat_id}. No success message sent to user.")
 
-    # بعد الإرسال، يجب إعادة لوحة المفاتيح
     reply_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_change_destination"])],
         [KeyboardButton(MESSAGES["keyboard_clear"])]
@@ -417,7 +418,7 @@ async def _process_and_forward_album(media_items: list, user_chat_id: int, conte
     reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
     await context.bot.send_message(
         chat_id=user_chat_id,
-        text=".", # رسالة نقطة لإعادة الكيبورد فقط
+        text=".",
         reply_markup=reply_markup
     )
 
@@ -456,18 +457,16 @@ async def reset_album_and_pending_groups(update: Update, context: ContextTypes.D
     await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data)
     context.user_data["temp_messages_to_clean"].clear()
 
-    # إلغاء أي مهام معلقة لتحويل مجموعات الوسائط لهذا المستخدم
     if '_media_groups_pending' in context.user_data:
-        context.user_data['_media_groups_pending'] = {} # مسح القائمة
-        # تأكد من الوصول لـ job_queue من application
+        context.user_data['_media_groups_pending'] = {}
         if context.application and hasattr(context.application, 'job_queue'):
             for job in context.application.job_queue.get_jobs_by_name(f"process_media_group_.*"):
-                if job.context and job.context.get("user_chat_id") == chat_id:
+                if job.context and job.context.get("user_chat_id") == chat_id: # التحقق من المستخدم الصحيح
                     job.schedule_removal()
                     logger.info(f"Cancelled job {job.name} for user {chat_id}.")
         logger.info(f"Cleared pending media groups and cancelled related jobs for user {chat_id}.")
 
-    context.user_data['_last_forward_timestamp'] = 0 # إعادة تعيين العداد الزمني
+    context.user_data['_last_forward_timestamp'] = 0
 
     main_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_change_destination"])],
@@ -503,7 +502,6 @@ async def cancel_operation_general(update: Update, context: ContextTypes.DEFAULT
     await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data)
     context.user_data["temp_messages_to_clean"].clear()
 
-    # عند إلغاء عملية، نلغي المهام المعلقة لهذا المستخدم
     if '_media_groups_pending' in context.user_data and context.application and hasattr(context.application, 'job_queue'):
         for job in context.application.job_queue.get_jobs_by_name(f"process_media_group_.*"):
             if job.context and job.context.get("user_chat_id") == chat_id:
@@ -538,15 +536,9 @@ def main() -> None:
         if not (channel_id_env.startswith("-100") and channel_id_env[1:].isdigit()):
             logger.error(f"Invalid CHANNEL_ID format: {channel_id_env}. It should start with '-100' followed by digits. Channel posting may not work correctly.")
 
-    # إنشاء JobQueue أولاً
     job_queue = JobQueue()
-    # تمرير job_queue إلى Application.builder()
     application = Application.builder().token(token).job_queue(job_queue).build()
 
-    # الآن يمكن استخدام application.job_queue
-    # job_queue: JobQueue = application.job_queue # هذا السطر لم يعد ضرورياً هنا
-
-    # ConversationHandler لضبط الوجهة
     destination_setting_conversation_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_destination'])}$") & ~filters.COMMAND, prompt_for_destination_setting),
@@ -576,7 +568,6 @@ def main() -> None:
     # معالج الرسائل التي تحتوي على صور أو فيديوهات
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_incoming_media))
 
-    # معالج زر "إعادة تعيين البوت"
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, reset_album_and_pending_groups))
 
     # معالج أي رسائل نصية لا تتطابق مع الأوامر أو أزرار لوحة المفاتيح (بخلاف المحادثات)
