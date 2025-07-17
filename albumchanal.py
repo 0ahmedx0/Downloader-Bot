@@ -389,7 +389,7 @@ async def handle_collecting_media_group(update: Update, context: ContextTypes.DE
     """
     message = update.message
     media_group_id = message.media_group_id
-    user_chat_id = update.effective_chat.id # الحصول على user_chat_id
+    user_chat_id = update.effective_chat.id
 
     # تأكد أنها نفس مجموعة الوسائط التي نجمعها حالياً
     if media_group_id and context.user_data.get('current_media_group_id') == media_group_id:
@@ -460,14 +460,6 @@ async def _send_caption_prompt_after_collection_job(context: ContextTypes.DEFAUL
             reply_markup=inline_markup
         )
         user_data_for_job["messages_to_delete"].append(prompt_msg.message_id)
-
-        # مهم جداً: يجب أن يتم تبديل حالة ConversationHandler هنا إلى ASKING_FOR_CAPTION
-        # لكن لا يمكننا القيام بذلك مباشرة من داخل Job.
-        # الحل هو أن _send_caption_prompt_after_collection_job يجب أن تستدعي وظيفة
-        # تعيد بدء المحادثة وتضعها في الحالة الصحيحة (ASKING_FOR_CAPTION) بشكل آمن.
-        # الطريقة الأفضل لذلك هي عبر Application.update_queue.
-        # ولكن لن نغير هذا الجزء حالياً، لأنه لا يزال هناك احتمال أن يستجيب CalllbackHandler في COLLECTING_MEDIA_GROUP
-
     else:
         logger.debug(f"Job triggered for {media_group_id} but it's not the current active media group or already handled for user {user_chat_id}.")
 
@@ -506,13 +498,8 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
     user_choice_data = query.data
     user_chat_id = query.message.chat_id
 
-    # Log current state to debug
-    # For CallbackQuery, context.dispatcher.user_data doesn't always reflect current conversation state.
-    # Get state from ConversationHandler itself.
-    current_handler = context.dispatcher.handlers[1][0] # Assuming album_forwarding_with_caption_conversation_handler is the second added
-    current_conv_state = current_handler.get_user_and_thread_data(user_chat_id, None)[0] # Get state
-    logger.info(f"handle_caption_choice triggered in state {current_conv_state} by user {user_chat_id} with data {user_choice_data}")
-
+    # إزالة سطر الـ Debug الذي تسبب في الخطأ
+    logger.info(f"handle_caption_choice triggered by user {user_chat_id} with data {user_choice_data}")
 
     await query.answer()
 
@@ -545,11 +532,11 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
                 return ASKING_FOR_MANUAL_CAPTION
             elif selected_option_text == "لا يوجد تعليق":
                 context.user_data["chosen_album_caption"] = ""
-                await _trigger_album_forward(update, context) # Pass update
+                await _trigger_album_forward(update, context)
                 return ConversationHandler.END
             else:
                 context.user_data["chosen_album_caption"] = selected_option_text
-                await _trigger_album_forward(update, context) # Pass update
+                await _trigger_album_forward(update, context)
                 return ConversationHandler.END
         else:
             await query.message.reply_text(MESSAGES["invalid_input_choice"])
@@ -597,32 +584,14 @@ async def _trigger_album_forward(update: Update, context: ContextTypes.DEFAULT_T
         ], resize_keyboard=True, one_time_keyboard=False))
         return
 
-    # بناء قائمة InputMedia objects هنا، قبل إرسالها للـ Job
-    input_media_list = []
-    # يجب التأكد من أن original_caption سيتم أخذه من العنصر الأول فقط
-    # Original caption is irrelevant now, only chosen_album_caption will be used for first item.
-    
-    for idx, media_data in enumerate(raw_media_data):
-        file_id = media_data['file_id']
-        media_type = media_data['type']
-        
-        current_caption = None
-        if idx == 0: # التعليق يطبق على أول عنصر فقط
-             current_caption = album_caption # نستخدم التعليق الذي اختاره المستخدم
-        
-        if media_type == "photo":
-            input_media_list.append(InputMediaPhoto(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML))
-        elif media_type == "video":
-            input_media_list.append(InputMediaVideo(media=file_id, caption=current_caption, supports_streaming=True, parse_mode=ParseMode.HTML))
-
-
     job_name = f"forward_album_{album_identifier}"
 
     context.job_queue.run_once(
         _process_and_forward_album_job,
         0, # إرسال فوري، التأخير يتم معالجته داخل _process_and_forward_album
         data={
-            "input_media_list": input_media_list,
+            "raw_media_data": raw_media_data, # نمرر البيانات الخام
+            "album_caption": album_caption,
             "user_chat_id": user_chat_id,
             "user_data_ref": context.user_data,
             "bot_instance": context.bot
@@ -642,29 +611,31 @@ async def _process_and_forward_album_job(context: ContextTypes.DEFAULT_TYPE):
     تُستدعى من JobQueue، لذلك تمرير البيانات يكون عبر context.job.data.
     """
     job_data = context.job.data
-    input_media_list = job_data["input_media_list"]
+    raw_media_data = job_data["raw_media_data"]
+    album_caption = job_data["album_caption"]
     user_chat_id_for_job = job_data["user_chat_id"]
     user_data_ref = job_data["user_data_ref"]
     bot_instance = job_data["bot_instance"]
 
     async with _forward_lock:
         await _process_and_forward_album(
-            input_media_list,
+            raw_media_data,
+            album_caption,
             user_chat_id_for_job,
             user_data_ref,
             bot_instance
         )
 
 
-async def _process_and_forward_album(input_media_list: list, user_chat_id: int, user_data: dict, bot_instance):
+async def _process_and_forward_album(raw_media_data: list, album_caption: str, user_chat_id: int, user_data: dict, bot_instance):
     """
     وظيفة مساعدة لمعالجة وإرسال ألبوم (سواء كان مجموعة وسائط أو وسائط فردية).
     تستقبل البوت و user_data كوسائط.
     """
     target_chat_id = user_data.get("album_destination_chat_id")
 
-    if not input_media_list:
-        logger.warning(f"No input media items to forward for user {user_chat_id}, skipping album process.")
+    if not raw_media_data:
+        logger.warning(f"No raw media data to forward for user {user_chat_id}, skipping album process.")
         return
     
     if target_chat_id is None:
@@ -683,6 +654,21 @@ async def _process_and_forward_album(input_media_list: list, user_chat_id: int, 
 
     user_data['_last_forward_timestamp'] = time.time()
 
+    # بناء قائمة InputMedia objects هنا، قبل الإرسال مباشرة
+    input_media_list = []
+    for idx, media_data in enumerate(raw_media_data):
+        file_id = media_data['file_id']
+        media_type = media_data['type']
+        
+        current_caption = None
+        if idx == 0:
+             current_caption = album_caption # نستخدم التعليق الذي اختاره المستخدم
+        
+        if media_type == "photo":
+            input_media_list.append(InputMediaPhoto(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML))
+        elif media_type == "video":
+            input_media_list.append(InputMediaVideo(media=file_id, caption=current_caption, supports_streaming=True, parse_mode=ParseMode.HTML))
+            
     logger.info(f"Forwarding album ({len(input_media_list)} items) to {target_chat_id}.")
 
     success, sent_messages = await send_media_group_with_backoff(
@@ -731,7 +717,7 @@ async def clear_all_temp_messages_after_delay(bot, chat_id, delay, context_user_
     await asyncio.sleep(delay)
 
     if "temp_messages_to_clean" in context_user_data:
-        message_ids = list(context_user_data["messages_to_delete"]) # كانت تاخد من messages_to_delete، المفروض من temp_messages_to_clean
+        message_ids = list(context_user_data["temp_messages_to_clean"])
         for msg_id in message_ids:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=msg_id)
@@ -930,18 +916,12 @@ def main() -> None:
         states={
             COLLECTING_MEDIA_GROUP: [
                 MessageHandler(filters.PHOTO | filters.VIDEO, handle_collecting_media_group),
-                # IMPORТANT: Catch CallbackQuery in COLLECTING_MEDIA_GROUP
-                # This ensures that if the job sends the inline buttons while in this state,
-                # the click is still caught by this handler.
                 CallbackQueryHandler(handle_caption_choice, pattern=f"^{CAPTION_CB_PREFIX}.*|^({CANCEL_CB_DATA})$"),
-                # إذا جاء أي شيء آخر غير صورة/فيديو أو callback (أثناء الجمع)، نلغي المحادثة
                 MessageHandler(filters.ALL & ~filters.COMMAND, cancel_current_album_process),
             ],
             ASKING_FOR_CAPTION: [
-                # تلتقط اختيار التعليق من الأزرار المضمنة
                 CallbackQueryHandler(handle_caption_choice, pattern=f"^{CAPTION_CB_PREFIX}.*|^({CANCEL_CB_DATA})$"),
-                # هنا يجب أن نلتقط رسالة نصية فقط إذا اختار المستخدم "إدخال تعليق يدوي"
-                # لا نحتاج MessageHandler هنا لأنها ستمرر لل Fallbacks لو كانت رسالة نصية غير متوقعة
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: u.effective_message.reply_text(MESSAGES["invalid_input_choice"])),
             ],
             ASKING_FOR_MANUAL_CAPTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption),
@@ -955,7 +935,6 @@ def main() -> None:
             CommandHandler("help", cancel_current_album_process),
             CommandHandler("settings", cancel_current_album_process),
             CommandHandler("source", cancel_current_album_process),
-            # التقاط أي شيء آخر لم تتم معالجته داخل المحادثة
             MessageHandler(filters.ALL & ~filters.COMMAND, cancel_current_album_process)
         ],
         map_to_parent={
