@@ -37,15 +37,14 @@ logger = logging.getLogger(__name__)
 # الحالات للمحادثة
 ASKING_FOR_CAPTION = 1
 ASKING_FOR_MANUAL_CAPTION = 2
-# ASKING_FOR_SEND_LOCATION = 3 # هذه الحالة سيتم دمجها أو استبدالها بوجهة ثابتة
-SETTING_GLOBAL_DESTINATION = 3 # حالة جديدة لضبط الوجهة بشكل دائم
+SETTING_GLOBAL_DESTINATION = 3
 
 # Callbacks prefixes
 CAPTION_CB_PREFIX = "cap_"
-SEND_LOC_CB_PREFIX = "sendloc_" # سيظل هذا prefix مستخدمًا في ضبط الوجهة الأولية/تغييرها
+SEND_LOC_CB_PREFIX = "sendloc_"
 CANCEL_CB_DATA = "cancel_op"
 
-# الرسائل المستخدمة
+# الرسائل المستخدمة (سنتركها كما هي لسهولة فهم المعاني، لكننا لن نستخدم بعضها)
 MESSAGES = {
     "greeting": (
         "مرحباً {username}! هل سبق أن وجدت صوراً رائعة على تيليجرام "
@@ -68,7 +67,7 @@ MESSAGES = {
     "source": "https://github.com/wjclub/telegram-bot-album-creator",
     "keyboard_done": "إنشاء ألبوم",
     "keyboard_clear": "إعادة تعيين الألبوم",
-    "keyboard_change_destination": "تغيير وجهة الألبوم 🔄", # زر جديد
+    "keyboard_change_destination": "تغيير وجهة الألبوم 🔄",
     "not_enough_media_items": "📦 تحتاج إلى إرسال صورتين أو أكثر لتكوين ألبوم.",
     "queue_cleared": "لقد نسيت كل الصور والفيديوهات التي أرسلتها لي. لديك فرصة جديدة.",
     "album_caption_prompt": "الرجاء اختيار تعليق للألبوم من الأزرار أدناه:",
@@ -77,19 +76,20 @@ MESSAGES = {
     "album_caption_confirm_no_caption": "👍 حسناً! لن يكون هناك تعليق للألبوم.\n",
     "processing_album_start": "⏳ جاري إنشاء الألبوم. قد يستغرق هذا بعض الوقت...\n\n",
     "progress_update": "جاري إرسال الألبوم: *{processed_albums}/{total_albums}*\nالوقت المتبقي المقدر: *{time_remaining_str}*.",
+    # هذه الرسائل لن تظهر للمستخدم الآن
     "album_creation_success": "✅ تم إنشاء جميع الألبومات بنجاح!",
     "album_creation_error": "❌ حدث خطأ أثناء إرسال الألبوم. يرجى المحاولة لاحقاً.",
     "album_chunk_fail": "⚠️ فشل إرسال جزء من الألبوم ({index}/{total_albums}). سأحاول الاستمرار مع البقية.",
     "cancel_caption": "لقد ألغيت عملية إنشاء الألبوم. يمكنك البدء من جديد.",
     "cancel_operation": "تم إلغاء العملية.",
     "album_comment_option_manual": "إدخال تعليق يدوي",
-    "ask_send_location": "أين تود إرسال الألبوم؟", # تستخدم الآن فقط لضبط الوجهة الدائمة
+    "ask_send_location": "أين تود إرسال الألبوم؟",
     "send_to_channel_button": "القناة 📢",
     "send_to_chat_button": "المحادثة معي 👤",
     "channel_id_missing": "❌ لم يتم ضبط معرف القناة (CHANNEL_ID) في بيئة البوت. لا يمكن الإرسال للقناة. الرجاء الاتصال بالمطور.",
     "invalid_input_choice": "خيار غير صالح أو إدخال غير متوقع. الرجاء الاختيار من الأزرار أو إلغاء العملية.",
-    "album_action_confirm": "{caption_status}", # تم حذف prompt_for_location_string
-    "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه.",
+    "album_action_confirm": "{caption_status}",
+    "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه.", # لن تظهر هذه الرسالة بعد الألبوم
     "caption_cancelled_by_inline_btn": "تم إلغاء عملية اختيار التعليق."
 }
 
@@ -107,7 +107,7 @@ PREDEFINED_CAPTION_OPTIONS = [
     "حصريات عربي 🌈🔥.",
     "حصريات اجنبي 🌈🔥.",
     "لا يوجد تعليق",
-    MESSAGES["album_comment_option_manual"], # خيار "إدخال تعليق يدوي"
+    MESSAGES["album_comment_option_manual"],
 ]
 
 
@@ -127,13 +127,12 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
     """يضمن تهيئة context.user_data وقائمة الوسائط."""
     if "media_queue" not in context.user_data:
         context.user_data["media_queue"] = []
-    if "messages_to_delete" not in context.user_data: # Messages that must be deleted promptly
+    if "messages_to_delete" not in context.user_data:
         context.user_data["messages_to_delete"] = []
-    if "temp_messages_to_clean" not in context.user_data: # Messages that can be deleted after a delay
+    if "temp_messages_to_clean" not in context.user_data:
         context.user_data["temp_messages_to_clean"] = []
-    if "progress_message_id" not in context.user_data: # Specific ID for the progress message
+    if "progress_message_id" not in context.user_data:
         context.user_data["progress_message_id"] = None
-    # المتغيرات الجديدة لتخزين الوجهة
     if "album_destination_chat_id" not in context.user_data:
         context.user_data["album_destination_chat_id"] = None
     if "album_destination_name" not in context.user_data:
@@ -163,7 +162,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     username = update.effective_user.username or "human"
     message = MESSAGES["greeting"].format(username=username)
 
-    # إضافة زر "تغيير وجهة الألبوم" إلى لوحة المفاتيح الرئيسية
     reply_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
         [KeyboardButton(MESSAGES["keyboard_clear"]), KeyboardButton(MESSAGES["keyboard_change_destination"])]
@@ -171,7 +169,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
     await update.message.reply_text(message, reply_markup=reply_markup)
 
-    # إذا لم يتم تعيين الوجهة بعد، ابدأ المحادثة لتعيينها
     if context.user_data["album_destination_chat_id"] is None:
         await prompt_for_destination_setting(update, context, initial_setup=True)
 
@@ -210,26 +207,25 @@ async def send_media_group_with_backoff(context: ContextTypes.DEFAULT_TYPE, chat
         except RetryAfter as e:
             logger.warning("RetryAfter: chunk %d, attempt %d. Waiting for %s seconds.",
                            chunk_index + 1, attempt + 1, e.retry_after)
-            target_name = context.user_data.get("album_destination_name", "الوجهة")
-            await context.bot.send_message(chat_id=user_chat_id, text=f"⚠️ تجاوزت حد رسائل تيليجرام لـ{target_name}. سأنتظر {e.retry_after} ثانية قبل إعادة المحاولة.")
+            # تم حذف إرسال رسالة للمستخدم هنا لتلبية طلب "لا أريد أي رسالة تحذيرية"
+            # await context.bot.send_message(chat_id=user_chat_id, text=f"⚠️ تجاوزت حد رسائل تيليجرام لـ{target_name}. سأنتظر {e.retry_after} ثانية قبل إعادة المحاولة.")
             await asyncio.sleep(e.retry_after)
         except TelegramError as e:
             logger.error("TelegramError sending album chunk %d on attempt %d: %s",
                          chunk_index + 1, attempt + 1, e)
-            error_message = MESSAGES["album_creation_error"]
-            if "Forbidden: bot was blocked by the user" in str(e) or "chat not found" in str(e).lower() or "bot is not a member" in str(e).lower() or "not a member of the channel" in str(e).lower() or "not enough rights" in str(e).lower() or "need to be admin" in str(e).lower():
-                error_message = "❌ فشل إرسال الألبوم: البوت ليس لديه صلاحية الإرسال لهذه القناة/الدردشة أو غير موجود فيها. الرجاء التأكد من الأذونات الصحيحة (نشر، تثبيت)."
-            await context.bot.send_message(chat_id=user_chat_id, text=error_message)
+            # تم حذف إرسال رسالة للمستخدم هنا
+            # await context.bot.send_message(chat_id=user_chat_id, text=error_message)
             return False, None
         except Exception as e:
             logger.error("Generic Error sending album chunk %d on attempt %d: %s",
                          chunk_index + 1, attempt + 1, e)
-            await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["album_creation_error"])
+            # تم حذف إرسال رسالة للمستخدم هنا
+            # await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["album_creation_error"])
             return False, None
     return False, None
 
 # -------------------------------------------------------------
-# دوال ConversationHandler للوجهة والتعليقات
+# دوال ConversationHandler
 # -------------------------------------------------------------
 
 async def prompt_for_destination_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial_setup: bool = False) -> int:
@@ -280,7 +276,7 @@ async def handle_global_destination_choice(update: Update, context: ContextTypes
         logger.warning(f"Error deleting inline button message: {e}")
 
     if destination_choice_data == CANCEL_CB_DATA:
-        await cancel_operation_general(update, context) # استخدام دالة إلغاء عامة
+        await cancel_operation_general(update, context)
         return ConversationHandler.END
 
     send_chat_id = None
@@ -289,9 +285,10 @@ async def handle_global_destination_choice(update: Update, context: ContextTypes
     if destination_choice_data == f"{SEND_LOC_CB_PREFIX}channel":
         send_chat_id_env = os.getenv("CHANNEL_ID")
         if not send_chat_id_env:
+            # رسالة خطأ حول CHANNEL_ID لا تزال ضرورية هنا كإعداد
             error_msg = await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["channel_id_missing"])
             context.user_data["messages_to_delete"].append(error_msg.message_id)
-            return await prompt_for_destination_setting(update, context) # إعادة طلب الوجهة إذا كان هناك خطأ
+            return await prompt_for_destination_setting(update, context)
         try:
             send_chat_id = int(send_chat_id_env)
             destination_name = MESSAGES["send_to_channel_button"]
@@ -318,7 +315,6 @@ async def handle_global_destination_choice(update: Update, context: ContextTypes
     )
     context.user_data["messages_to_delete"].append(feedback_msg.message_id)
 
-    # نُظهر لوحة المفاتيح الرئيسية مرة أخرى
     reply_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"])],
         [KeyboardButton(MESSAGES["keyboard_clear"]), KeyboardButton(MESSAGES["keyboard_change_destination"])]
@@ -326,7 +322,7 @@ async def handle_global_destination_choice(update: Update, context: ContextTypes
     reply_markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
     await context.bot.send_message(
         chat_id=user_chat_id,
-        text=MESSAGES["success_message_permanent_prompt"],
+        text=MESSAGES["success_message_permanent_prompt"], # هذه الرسالة لا علاقة لها بإرسال الألبوم بل بإعداد الوجهة
         reply_markup=reply_markup
     )
     return ConversationHandler.END
@@ -339,11 +335,9 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
     await initialize_user_data(context)
     user_chat_id = update.effective_chat.id
 
-    # حذف كل الرسائل المؤقتة من التفاعل السابق عند بدء عملية جديدة
     await delete_messages_from_queue(context, user_chat_id)
     context.user_data["temp_messages_to_clean"].clear()
 
-    # التحقق مما إذا كانت وجهة الألبوم مضبوطة
     if context.user_data["album_destination_chat_id"] is None:
         await update.message.reply_text(MESSAGES["destination_not_set_error"])
         return ConversationHandler.END
@@ -355,7 +349,6 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
         await update.message.reply_text(MESSAGES["not_enough_media_items"])
         return ConversationHandler.END
 
-    # بناء InlineKeyboard لأزرار التعليقات
     inline_keyboard_buttons = []
     for i, caption_text in enumerate(PREDEFINED_CAPTION_OPTIONS):
         inline_keyboard_buttons.append([InlineKeyboardButton(caption_text, callback_data=f"{CAPTION_CB_PREFIX}{i}")])
@@ -391,7 +384,7 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
         logger.warning(f"Error deleting inline button message: {e}")
 
     if user_choice_data == CANCEL_CB_DATA:
-        await cancel_album_creation(update, context) # Use the existing cancel flow
+        await cancel_album_creation(update, context)
         return ConversationHandler.END
 
     if user_choice_data.startswith(CAPTION_CB_PREFIX):
@@ -412,16 +405,12 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
             elif selected_option_text == "لا يوجد تعليق":
                 user_caption = ""
                 context.user_data["current_album_caption"] = user_caption
-                caption_status_message = MESSAGES["album_caption_confirm_no_caption"]
-                context.user_data["caption_status_message"] = caption_status_message
-                # بما أن الوجهة محفوظة، ننتقل مباشرة للتنفيذ
+                context.user_data["caption_status_message"] = MESSAGES["album_caption_confirm_no_caption"]
                 return await finalize_album_action(update, context)
             else:
                 user_caption = selected_option_text
                 context.user_data["current_album_caption"] = user_caption
-                caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_caption)
-                context.user_data["caption_status_message"] = caption_status_message
-                # بما أن الوجهة محفوظة، ننتقل مباشرة للتنفيذ
+                context.user_data["caption_status_message"] = MESSAGES["album_caption_confirm"].format(caption=user_caption)
                 return await finalize_album_action(update, context)
         else:
             await query.message.reply_text(MESSAGES["invalid_input_choice"])
@@ -444,10 +433,8 @@ async def receive_manual_album_caption(update: Update, context: ContextTypes.DEF
         user_caption = ""
 
     context.user_data["current_album_caption"] = user_caption
-    caption_status_message = MESSAGES["album_caption_confirm"].format(caption=user_caption) if user_caption else MESSAGES["album_caption_confirm_no_caption"]
-    context.user_data["caption_status_message"] = caption_status_message
+    context.user_data["caption_status_message"] = MESSAGES["album_caption_confirm"].format(caption=user_caption) if user_caption else MESSAGES["album_caption_confirm_no_caption"]
 
-    # بعد استلام التعليق اليدوي، ننتقل مباشرة للتنفيذ
     return await finalize_album_action(update, context)
 
 
@@ -456,13 +443,13 @@ async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TY
     الدالة التي تنفذ إرسال الألبوم بعد تحديد التعليق والوجهة.
     """
     user_chat_id = update.effective_chat.id
-    # حذف كل الرسائل المعلقة للحذف
     await delete_messages_from_queue(context, user_chat_id)
 
     album_caption = context.user_data.get("current_album_caption", "")
     target_chat_id = context.user_data.get("album_destination_chat_id")
 
     # إرسال رسالة "جاري إنشاء الألبوم" وتخزين معرفها للتعديل
+    # هذه الرسالة ستظل ظاهرة ليعلم المستخدم أن البوت يعمل
     progress_msg = await context.bot.send_message(
         chat_id=user_chat_id,
         text=MESSAGES["processing_album_start"] + MESSAGES["progress_update"].format(processed_albums=0, total_albums="؟", time_remaining_str="...") ,
@@ -474,26 +461,10 @@ async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TY
     # تشغيل مهمة إنشاء الألبوم
     await execute_album_creation(update, context, album_caption, target_chat_id)
 
-    # بعد الانتهاء من execute_album_creation
-    final_feedback_msg = await context.bot.send_message(
-        chat_id=user_chat_id,
-        text=MESSAGES["album_creation_success"],
-    )
-    context.user_data["temp_messages_to_clean"].append(final_feedback_msg.message_id)
+    # جميع الرسائل بعد إرسال الألبوم تم إزالتها هنا بناءً على طلبك
+    # لا توجد رسالة نجاح، لا رسالة خطأ عامة، ولا إعادة إرسال لوحة المفاتيح هنا.
 
-    # إرسال لوحة المفاتيح الرئيسية الدائمة
-    main_keyboard = [
-        [KeyboardButton(MESSAGES["keyboard_done"])],
-        [KeyboardButton(MESSAGES["keyboard_clear"]), KeyboardButton(MESSAGES["keyboard_change_destination"])]
-    ]
-    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-    permanent_prompt_msg = await context.bot.send_message(
-        chat_id=user_chat_id,
-        text=MESSAGES["success_message_permanent_prompt"],
-        reply_markup=reply_markup_main
-    )
-
-    # البدء بمهمة خلفية لحذف جميع الرسائل المؤقتة بعد تأخير
+    # البدء بمهمة خلفية لحذف جميع الرسائل المؤقتة بعد تأخير (فقط رسائل البوت التي تم إرسالها خلال العملية)
     context.application.create_task(
         clear_all_temp_messages_after_delay(
             bot=context.bot,
@@ -541,13 +512,11 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     """
     chat_id = update.effective_chat.id
 
-    # Attempt to delete messages associated with previous interaction
     await delete_messages_from_queue(context, chat_id)
-    await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data) # Force immediate deletion
+    await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data)
     context.user_data["temp_messages_to_clean"].clear()
 
     context.user_data["media_queue"] = []
-    # تنظيف المتغيرات المتعلقة بعملية إنشاء الألبوم الحالية فقط، وليس الوجهة الثابتة
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
     context.user_data.pop("progress_message_id", None)
@@ -559,6 +528,7 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     ]
     reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
 
+    # هذه الرسالة تبقى لإعادة تعيين قائمة المحفوظات وإعادة لوحة المفاتيح
     await update.message.reply_text(
         MESSAGES["queue_cleared"],
         reply_markup=reply_markup_main
@@ -593,7 +563,7 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
     context.user_data.pop("progress_message_id", None)
-    context.user_data["media_queue"] = [] # Clear media queue as part of album creation cancellation
+    context.user_data["media_queue"] = []
 
 
     main_keyboard = [
@@ -602,6 +572,7 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
 
+    # هذه الرسالة تبقى لتأكيد الإلغاء وإعادة لوحة المفاتيح
     await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["cancel_caption"],
@@ -613,7 +584,6 @@ async def cancel_album_creation(update: Update, context: ContextTypes.DEFAULT_TY
 async def cancel_operation_general(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     يلغي أي عملية عامة ويعيد لوحة المفاتيح الرئيسية.
-    يُستخدم لأي عملية لا تندرج تحت "إلغاء إنشاء ألبوم".
     """
     chat_id = update.effective_chat.id
 
@@ -632,8 +602,6 @@ async def cancel_operation_general(update: Update, context: ContextTypes.DEFAULT
     await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data)
     context.user_data["temp_messages_to_clean"].clear()
 
-    # لا نمسح الـ media_queue هنا، لأن هذا الإلغاء ليس لإلغاء إنشاء ألبوم
-    # context.user_data["media_queue"] = []
     context.user_data.pop("current_album_caption", None)
     context.user_data.pop("caption_status_message", None)
     context.user_data.pop("progress_message_id", None)
@@ -644,6 +612,7 @@ async def cancel_operation_general(update: Update, context: ContextTypes.DEFAULT
     ]
     reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
 
+    # هذه الرسالة تبقى لتأكيد الإلغاء وإعادة لوحة المفاتيح
     await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["cancel_operation"],
@@ -710,25 +679,21 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
 
         logger.info(f"تم إرسال الدفعة {index + 1} إلى {target_chat_id}.")
 
-        # لا يجب التثبيت إلا إذا كان الهدف هو القناة (channel_id يبدأ بـ -100)
-        # ويفضل أن يكون التثبيت للمرسلة الأولى فقط في الألبوم
         if str(target_chat_id).startswith("-100") and sent_messages:
             try:
-                # يمكنك اختيار تثبيت أول رسالة من كل ألبوم أو فقط أول رسالة من الألبوم الأول
-                # حاليا: تثبيت أول رسالة من كل دفعة (sub-album)
                 await context.bot.pin_chat_message(chat_id=target_chat_id, message_id=sent_messages[0].message_id, disable_notification=True)
                 logger.info(f"تم تثبيت الرسالة الأولى من الألبوم الدفعة {index + 1} في القناة {target_chat_id}.")
             except Exception as pin_err:
                 logger.warning(f"فشل في تثبيت الرسالة (دفعة {index + 1}) في القناة: {pin_err}. يرجى التأكد من أن البوت مشرف ولديه أذن التثبيت.")
-                if user_chat_id != target_chat_id:
-                    await context.bot.send_message(chat_id=user_chat_id, text=f"⚠️ تم إرسال الألبوم الدفعة {index+1} لـ{destination_name} ولكن تعذر تثبيت الرسالة الأولى. يرجى التأكد من أذونات البوت (نشر وتثبيت).")
+                # تم حذف إرسال رسالة تحذيرية هنا بناءً على طلبك
+                # if user_chat_id != target_chat_id:
+                #    await context.bot.send_message(chat_id=user_chat_id, text=f"⚠️ تم إرسال الألبوم الدفعة {index+1} لـ{destination_name} ولكن تعذر تثبيت الرسالة الأولى. يرجى التأكد من أذونات البوت (نشر وتثبيت).")
 
         processed_albums += 1
 
         if total_albums > 1:
             time_remaining_str = "جاري الحساب..."
             remaining_albums = total_albums - processed_albums
-            # تقدير الوقت المتبقي بناءً على تأخير عشوائي مضافًا له وقت معالجة بسيط
             avg_delay_per_album = (get_random_delay(min_delay=5, max_delay=30, min_diff=7) + 5)
             estimated_time_remaining = remaining_albums * avg_delay_per_album
             minutes, seconds = divmod(int(estimated_time_remaining), 60)
@@ -761,7 +726,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         if index < len(chunks) - 1:
             await asyncio.sleep(get_random_delay())
 
-    context.user_data["media_queue"] = [] # مسح قائمة الوسائط بعد الإرسال الناجح
+    context.user_data["media_queue"] = []
 
 # تشغيل البوت
 def main() -> None:
@@ -780,11 +745,10 @@ def main() -> None:
 
     application = Application.builder().token(token).build()
 
-    # ConversationHandler لضبط الوجهة الأولية/تغييرها
     destination_setting_conversation_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_destination'])}$") & ~filters.COMMAND, prompt_for_destination_setting),
-            CommandHandler("start", start) # /start هو نقطة دخول أيضًا لضمان السؤال الأول
+            CommandHandler("start", start)
         ],
         states={
             SETTING_GLOBAL_DESTINATION: [
@@ -794,16 +758,13 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cancel_operation_general),
-            # Any other command or non-matching text while in conversation
             MessageHandler(filters.ALL & ~filters.COMMAND, cancel_operation_general)
         ],
         map_to_parent={
-            ConversationHandler.END: ConversationHandler.END # If the sub-conversation ends, the main bot loop resumes
+            ConversationHandler.END: ConversationHandler.END
         }
     )
 
-
-    # ConversationHandler لإنشاء الألبوم (التعليق فقط)
     album_creation_conversation_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_done'])}$") & ~filters.COMMAND, start_album_creation_process)
@@ -819,33 +780,27 @@ def main() -> None:
         },
         fallbacks=[
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, reset_album),
-            MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_destination'])}$") & ~filters.COMMAND, cancel_album_creation), # إلغاء عملية إنشاء الألبوم قبل تغيير الوجهة
+            MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_destination'])}$") & ~filters.COMMAND, cancel_album_creation),
             CommandHandler("cancel", cancel_album_creation),
             CommandHandler("start", cancel_album_creation),
             CommandHandler("help", cancel_album_creation),
             CommandHandler("settings", cancel_album_creation),
             CommandHandler("source", cancel_album_creation),
-            # Catch all unhandled messages during conversation and cancel cleanly
             MessageHandler(filters.ALL & ~filters.COMMAND, cancel_album_creation)
         ]
     )
 
-    # يجب إضافة هذا المعالج أولاً لضمان اعتراض /start إذا كان البوت بحاجة لضبط الوجهة
     application.add_handler(destination_setting_conversation_handler)
 
-    # أوامر البداية والمساعدة الأخرى
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("source", source_command))
 
-    # إضافة الوسائط
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, add_photo))
     application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, add_video))
 
-    # معالج محادثة إنشاء الألبوم
     application.add_handler(album_creation_conversation_handler)
 
-    # معالج زر "إعادة تعيين الألبوم" خارج المحادثة
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, reset_album))
 
 
