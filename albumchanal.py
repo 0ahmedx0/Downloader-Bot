@@ -36,9 +36,8 @@ logger = logging.getLogger(__name__)
 
 # الحالات للمحادثة
 SETTING_GLOBAL_DESTINATION = 1
-COLLECTING_MEDIA_GROUP = 2 # حالة جديدة لجمع أجزاء الألبوم
-ASKING_FOR_CAPTION = 3
-ASKING_FOR_MANUAL_CAPTION = 4
+ASKING_FOR_CAPTION = 2
+ASKING_FOR_MANUAL_CAPTION = 3
 
 # Callbacks prefixes
 SEND_LOC_CB_PREFIX = "sendloc_"
@@ -125,14 +124,13 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
         context.user_data["album_destination_name"] = None
     if '_last_forward_timestamp' not in context.user_data:
         context.user_data['_last_forward_timestamp'] = 0
-    # لتخزين بيانات كل وسيط (file_id, type, original_caption)
-    if 'current_album_raw_media_data' not in context.user_data:
-        context.user_data['current_album_raw_media_data'] = []
-    if 'current_media_group_id' not in context.user_data:
-        context.user_data['current_media_group_id'] = None
-    if 'chosen_album_caption' not in context.user_data:
-        context.user_data['chosen_album_caption'] = ""
-
+    # قوائم الانتظار وإدارة الألبومات المتتالية
+    if 'media_group_buffers' not in context.user_data:
+        context.user_data['media_group_buffers'] = {} # لتجميع الأجزاء مؤقتًا
+    if 'album_queue' not in context.user_data:
+        context.user_data['album_queue'] = [] # قائمة الألبومات الجاهزة للتحويل
+    if 'is_processing_album' not in context.user_data:
+        context.user_data['is_processing_album'] = False # لمنع بدء عملية جديدة قبل انتهاء الحالية
 
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """يحذف جميع الرسائل المخزنة في قائمة messages_to_delete."""
@@ -302,17 +300,18 @@ async def handle_global_destination_choice(update: Update, context: ContextTypes
 # دوال معالجة الوسائط والألبومات
 # -------------------------------------------------------------
 
-async def handle_incoming_media_and_start_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def collect_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    تُستدعى كـ entry point لـ ConversationHandler بعد استلام وسائط.
-    تُخزن الوسائط، وتُحدد ما إذا كانت جزءًا من مجموعة، وتُبادر بعملية طلب التعليق.
+    معالج بسيط لجمع كل الوسائط المرسلة ووضعها في قائمة انتظار.
+    لا يبدأ أي محادثات.
     """
     user_chat_id = update.effective_chat.id
-    await initialize_user_data(context) # تأكد أن بيانات المستخدم مهيأة
+    await initialize_user_data(context)
 
     # تحقق من ضبط الوجهة أولاً
     if context.user_data.get("album_destination_chat_id") is None:
         await update.message.reply_text(MESSAGES["destination_not_set_error"])
+        # إعادة لوحة المفاتيح
         reply_keyboard = [
             [KeyboardButton(MESSAGES["keyboard_change_destination"])],
             [KeyboardButton(MESSAGES["keyboard_clear"])]
@@ -323,11 +322,8 @@ async def handle_incoming_media_and_start_flow(update: Update, context: ContextT
             text=MESSAGES["success_message_permanent_prompt"],
             reply_markup=reply_markup
         )
-        return ConversationHandler.END
+        return
 
-
-    # مسح أي رسائل سابقة من البوت تتعلق بالعملية السابقة (لإعداد رسائل الأزرار الجديدة)
-    await delete_messages_from_queue(context, user_chat_id)
 
     message = update.message
     media_group_id = message.media_group_id
@@ -344,162 +340,93 @@ async def handle_incoming_media_and_start_flow(update: Update, context: ContextT
         file_id = message.video.file_id
         media_type = "video"
     else:
-        logger.debug(f"Received non-photo/video message from user {user_chat_id} - exiting handle_incoming_media_and_start_flow.")
-        return ConversationHandler.END
-
-
-    if media_type:
-        # تخزين البيانات الخام للوسيط بدلاً من كائن InputMedia (لإعادة بنائه لاحقًا مع الكابتشن المختار)
-        media_data = {'file_id': file_id, 'type': media_type, 'original_caption': caption_raw}
-
-        # تهيئة قائمة الوسائط للألبوم الحالي في context.user_data
-        # هذه قائمة بيانات خام، لا InputMedia objects
-        if 'current_media_group_id' not in context.user_data or context.user_data['current_media_group_id'] != current_album_identifier:
-            context.user_data['current_album_raw_media_data'] = []
-            context.user_data['current_media_group_id'] = current_album_identifier
-        
-        context.user_data['current_album_raw_media_data'].append(media_data)
-
-        # إذا كانت مجموعة وسائط, ننتقل لحالة الجمع COLLECTING_MEDIA_GROUP
-        if media_group_id:
-            job_name = f"final_collect_job_{media_group_id}"
-            current_jobs = context.job_queue.get_jobs_by_name(job_name)
-            for job in current_jobs:
-                job.schedule_removal() # إلغاء المهام السابقة لنفس المجموعة لتحديث المؤقت
-
-            context.job_queue.run_once(
-                _send_caption_prompt_after_collection_job, # هذا Job الآن سيرسل أزرار التعليق
-                MEDIA_GROUP_COLLECTION_TIMEOUT,
-                data={"media_group_id": media_group_id, "user_chat_id": user_chat_id},
-                name=job_name
-            )
-            return COLLECTING_MEDIA_GROUP # البقاء في هذه الحالة لجمع باقي الأجزاء
-        else:
-            # إذا كانت وسائط مفردة، نسأل عن التعليق مباشرةً
-            return await ask_for_caption_and_send_prompt(update, context)
-    else:
-        logger.warning(f"No media type detected for message from user {user_chat_id}.")
-        return ConversationHandler.END
-
-
-async def handle_collecting_media_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    معالج يستقبل الرسائل اللاحقة (ضمن نفس مجموعة الوسائط).
-    يُضاف الرسالة إلى current_album_raw_media_data ويُعاد جدولة JobQueue.
-    """
-    message = update.message
-    media_group_id = message.media_group_id
-    user_chat_id = update.effective_chat.id
-
-    # تأكد أنها نفس مجموعة الوسائط التي نجمعها حالياً
-    if media_group_id and context.user_data.get('current_media_group_id') == media_group_id:
-        file_id = None
-        media_type = None
-        caption_raw = message.caption
-
-        if message.photo:
-            file_id = message.photo[-1].file_id
-            media_type = "photo"
-        elif message.video:
-            file_id = message.video.file_id
-            media_type = "video"
-        
-        if media_type:
-            media_data = {'file_id': file_id, 'type': media_type, 'original_caption': caption_raw}
-            context.user_data['current_album_raw_media_data'].append(media_data)
-
-            # إعادة جدولة وظيفة تأكيد الاكتمال لتمديد الوقت
-            job_name = f"final_collect_job_{media_group_id}"
-            current_jobs = context.job_queue.get_jobs_by_name(job_name)
-            for job in current_jobs:
-                job.schedule_removal()
-            
-            context.job_queue.run_once(
-                _send_caption_prompt_after_collection_job,
-                MEDIA_GROUP_COLLECTION_TIMEOUT, # تمديد التأخير
-                data={"media_group_id": media_group_id, "user_chat_id": user_chat_id},
-                name=job_name
-            )
-            return COLLECTING_MEDIA_GROUP # البقاء في نفس الحالة لجمع المزيد
-        logger.debug(f"Collected additional media for group {media_group_id}.")
-    else:
-        # إذا وصلت رسالة وسائط ولكنها ليست جزءًا من الألبوم النشط (إما ألبوم جديد أو مفرد)
-        # هذا يعني أن المحادثة الحالية قد انتهت (إرسال الألبوم)، والرسالة الجديدة يجب أن تبدأ محادثة جديدة
-        return ConversationHandler.END # إنهاء المحادثة الحالية للسماح لل ConversationHandler ببدء واحدة جديدة
-
-    return COLLECTING_MEDIA_GROUP # البقاء في هذه الحالة طالما الرسائل متتالية لنفس المجموعة
-
-async def _send_caption_prompt_after_collection_job(context: ContextTypes.DEFAULT_TYPE):
-    """
-    يُستدعى بواسطة JobQueue بعد مرور وقت `MEDIA_GROUP_COLLECTION_TIMEOUT` من استقبال آخر جزء من مجموعة وسائط.
-    وظيفتها التأكد من اكتمال المجموعة، ثم إظهار prompt التعليق.
-    """
-    job_data = context.job.data
-    media_group_id = job_data["media_group_id"]
-    user_chat_id = job_data["user_chat_id"]
-    
-    user_data_for_job = context.application.user_data.get(user_chat_id)
-    if not user_data_for_job:
-        logger.warning(f"user_data not found for chat_id {user_chat_id} in Job {media_group_id}. Skipping caption prompt.")
         return
 
-    # التأكد من أن هذه هي المجموعة التي يجمعها المستخدم حالياً
-    if user_data_for_job.get('current_media_group_id') == media_group_id:
-        logger.info(f"Media group {media_group_id} collected for user {user_chat_id}. Prompting for caption.")
+    media_data = {'file_id': file_id, 'type': media_type, 'original_caption': caption_raw}
 
+    # تخزين مؤقت في buffer حتى اكتمال تجميع الألبوم
+    if current_album_identifier not in context.user_data['media_group_buffers']:
+        context.user_data['media_group_buffers'][current_album_identifier] = []
+    
+    context.user_data['media_group_buffers'][current_album_identifier].append(media_data)
+    
+    # جدولة أو تحديث وظيفة نهائية لتأكيد اكتمال التجميع
+    job_name = f"complete_collection_job_{user_chat_id}_{current_album_identifier}"
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+
+    context.job_queue.run_once(
+        _finalize_album_and_queue_it_job,
+        MEDIA_GROUP_COLLECTION_TIMEOUT,
+        data={"album_identifier": current_album_identifier, "user_chat_id": user_chat_id},
+        name=job_name
+    )
+
+async def _finalize_album_and_queue_it_job(context: ContextTypes.DEFAULT_TYPE):
+    """
+    يتم استدعاؤها بعد انتهاء مهلة تجميع الألبوم.
+    تقوم بوضع الألبوم المكتمل في قائمة الانتظار الرئيسية `album_queue`.
+    """
+    job_data = context.job.data
+    album_identifier = job_data["album_identifier"]
+    user_chat_id = job_data["user_chat_id"]
+
+    user_data = context.application.user_data[user_chat_id]
+    
+    if album_identifier in user_data['media_group_buffers']:
+        collected_album = user_data['media_group_buffers'].pop(album_identifier)
+        user_data['album_queue'].append(collected_album)
+        logger.info(f"Album {album_identifier} with {len(collected_album)} items queued for processing for user {user_chat_id}.")
+        
+        # بعد وضع الألبوم في قائمة الانتظار، نبدأ المعالجة التسلسلية
+        # إذا لم يكن هناك ألبوم آخر قيد المعالجة
+        if not user_data.get('is_processing_album', False):
+             await _process_next_album_in_queue(context.bot, user_chat_id, user_data, context.application)
+
+
+async def _process_next_album_in_queue(bot, user_chat_id: int, user_data: dict, application: Application):
+    """
+    يسحب الألبوم التالي من قائمة الانتظار ويبدأ محادثة التعليق له.
+    """
+    if user_data['album_queue']:
+        user_data['is_processing_album'] = True
+        
+        # لا نحتاج لإرسال رسالة هنا، بل بدء ConversationHandler
+        # للقيام بذلك، سنستخدم طريقة "فانتوم" Update.
+        # ولكن لن نلجأ إلى هذا التعقيد الآن،
+        # بل سنجعل ConversationHandler يعمل بشكل مستقل ويستجيب للأزرار فقط
+
+        # دعنا نُعيد إرسال أزرار التعليق هنا
+        # وننشئ ConversationHandler ليستجيب للأزرار فقط.
         inline_keyboard_buttons = []
         for i, caption_text in enumerate(PREDEFINED_CAPTION_OPTIONS):
             inline_keyboard_buttons.append([InlineKeyboardButton(caption_text, callback_data=f"{CAPTION_CB_PREFIX}{i}")])
         inline_keyboard_buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)])
         inline_markup = InlineKeyboardMarkup(inline_keyboard_buttons)
         
-        prompt_msg = await context.bot.send_message(
+        prompt_msg = await bot.send_message(
             chat_id=user_chat_id,
             text=MESSAGES["album_caption_prompt"],
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=inline_markup
         )
-        user_data_for_job["messages_to_delete"].append(prompt_msg.message_id)
+        user_data["messages_to_delete"].append(prompt_msg.message_id)
+        # الآن نتوقع من المستخدم أن يضغط على زر، وسيتم التقاطه بواسطة ConversationHandler
+        # الذي لا يزال يعمل (ليس كجزء من عملية استقبال الألبومات)
     else:
-        logger.debug(f"Job triggered for {media_group_id} but it's not the current active media group or already handled for user {user_chat_id}.")
+        logger.info(f"Album queue for user {user_chat_id} is empty. Stopping processing loop.")
+        user_data['is_processing_album'] = False
 
-
-async def ask_for_caption_and_send_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    وظيفة مساعدة لطباعة أزرار اختيار التعليق للوسائط المفردة (أو بعد اكتمال تجميع المجموعة).
-    """
-    inline_keyboard_buttons = []
-    for i, caption_text in enumerate(PREDEFINED_CAPTION_OPTIONS):
-        inline_keyboard_buttons.append([InlineKeyboardButton(caption_text, callback_data=f"{CAPTION_CB_PREFIX}{i}")])
-    inline_keyboard_buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)])
-    inline_markup = InlineKeyboardMarkup(inline_keyboard_buttons)
-
-    # هنا يمكن أن تكون update قادمة من MessageHandler (وسائط مفردة) أو CalllbackQuery (زر).
-    # للتأكد من أنها ترسل الرسالة إلى الدردشة الصحيحة.
-    chat_id_to_send_to = update.effective_chat.id if update.effective_chat else update.callback_query.message.chat_id
-
-    prompt_msg = await context.bot.send_message(
-        chat_id=chat_id_to_send_to,
-        text=MESSAGES["album_caption_prompt"],
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=inline_markup
-    )
-    context.user_data["messages_to_delete"].append(prompt_msg.message_id)
-
-    return ASKING_FOR_CAPTION # ننتقل إلى هذه الحالة عند إرسال prompt التعليق
 
 async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     تستقبل اختيار التعليق من Inline Buttons.
-    هذه الدالة الآن هي المعالج لكل من ASKING_FOR_CAPTION و COLLECTING_MEDIA_GROUP
-    (إذا جاء CallbackQuery منهما)
+    هذه الدالة الآن هي المعالج الرئيسي لعملية اختيار التعليق.
     """
     query = update.callback_query
     user_choice_data = query.data
     user_chat_id = query.message.chat_id
-
-    # إزالة سطر الـ Debug الذي تسبب في الخطأ
-    logger.info(f"handle_caption_choice triggered by user {user_chat_id} with data {user_choice_data}")
 
     await query.answer()
 
@@ -512,7 +439,16 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
         logger.warning(f"Error deleting inline button message: {e}")
 
     if user_choice_data == CANCEL_CB_DATA:
-        await cancel_current_album_process(update, context)
+        # هنا الإلغاء سيُفرّغ الألبوم الحالي من قائمة الانتظار وينظف الحالة
+        if context.user_data['album_queue']:
+             context.user_data['album_queue'].pop(0) # Remove current album
+        context.user_data['is_processing_album'] = False
+        # وننهي المحادثة الحالية (التي هي لطلب التعليق)
+        await context.bot.send_message(chat_id=user_chat_id, text=MESSAGES["cancel_operation"], reply_markup=ReplyKeyboardMarkup([
+            [KeyboardButton(MESSAGES["keyboard_change_destination"])],
+            [KeyboardButton(MESSAGES["keyboard_clear"])]
+        ], resize_keyboard=True, one_time_keyboard=False))
+
         return ConversationHandler.END
 
     if user_choice_data.startswith(CAPTION_CB_PREFIX):
@@ -526,25 +462,24 @@ async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TY
                     chat_id=user_chat_id,
                     text=MESSAGES["album_caption_manual_prompt"],
                     parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=ReplyKeyboardRemove() # يزيل لوحة المفاتيح
+                    reply_markup=ReplyKeyboardRemove()
                 )
                 context.user_data["messages_to_delete"].append(manual_prompt_msg.message_id)
                 return ASKING_FOR_MANUAL_CAPTION
             elif selected_option_text == "لا يوجد تعليق":
-                context.user_data["chosen_album_caption"] = ""
-                await _trigger_album_forward(update, context)
-                return ConversationHandler.END
+                album_caption = ""
             else:
-                context.user_data["chosen_album_caption"] = selected_option_text
-                await _trigger_album_forward(update, context)
-                return ConversationHandler.END
+                album_caption = selected_option_text
+
+            await _trigger_album_forward(update, context, album_caption)
+            return ConversationHandler.END
         else:
             await query.message.reply_text(MESSAGES["invalid_input_choice"])
-            await cancel_current_album_process(update, context)
+            await cancel_operation_general(update, context) # Use general cancel
             return ConversationHandler.END
     else:
         await query.message.reply_text(MESSAGES["invalid_input_choice"])
-        await cancel_current_album_process(update, context)
+        await cancel_operation_general(update, context)
         return ConversationHandler.END
 
 
@@ -553,45 +488,51 @@ async def receive_manual_album_caption(update: Update, context: ContextTypes.DEF
     تستقبل التعليق اليدوي وتنتقل لتنفيذ إنشاء الألبوم.
     """
     user_caption = update.message.text
-    user_chat_id = update.effective_chat.id
 
     if user_caption == '.':
         user_caption = ""
 
-    context.user_data["chosen_album_caption"] = user_caption
-
-    await _trigger_album_forward(update, context)
+    await _trigger_album_forward(update, context, user_caption)
 
     return ConversationHandler.END
 
 
-async def _trigger_album_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _trigger_album_forward(update: Update, context: ContextTypes.DEFAULT_TYPE, album_caption: str):
     """
     وظيفة مساعدة لجدولة مهمة تحويل الألبوم بعد تحديد التعليق.
-    تستقبل Update لتتمكن من استخراج effective_chat.id.
     """
     user_chat_id = update.effective_chat.id
     
-    album_identifier = context.user_data.get('current_media_group_id')
-    raw_media_data = context.user_data.get('current_album_raw_media_data', [])
-    album_caption = context.user_data.get('chosen_album_caption', "")
-
-    if not raw_media_data or album_identifier is None:
-        logger.error(f"No raw media data or identifier found for user {user_chat_id} when attempting to trigger album forward.")
-        await context.bot.send_message(chat_id=user_chat_id, text=".", reply_markup=ReplyKeyboardMarkup([
-            [KeyboardButton(MESSAGES["keyboard_change_destination"])],
-            [KeyboardButton(MESSAGES["keyboard_clear"])]
-        ], resize_keyboard=True, one_time_keyboard=False))
+    # يجب أن يسحب الألبوم الحالي من قائمة الانتظار
+    raw_media_data = []
+    if context.user_data['album_queue']:
+        raw_media_data = context.user_data['album_queue'].pop(0)
+    else:
+        logger.error(f"Album queue is empty for user {user_chat_id} when trying to trigger album forward.")
         return
 
-    job_name = f"forward_album_{album_identifier}"
+    # بناء قائمة InputMedia objects هنا، قبل إرسالها للـ Job
+    input_media_list = []
+    for idx, media_data in enumerate(raw_media_data):
+        file_id = media_data['file_id']
+        media_type = media_data['type']
+        
+        current_caption = None
+        if idx == 0:
+             current_caption = album_caption
+        
+        if media_type == "photo":
+            input_media_list.append(InputMediaPhoto(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML))
+        elif media_type == "video":
+            input_media_list.append(InputMediaVideo(media=file_id, caption=current_caption, supports_streaming=True, parse_mode=ParseMode.HTML))
+    
+    job_name = f"forward_album_{user_chat_id}_{time.time()}"
 
     context.job_queue.run_once(
         _process_and_forward_album_job,
-        0, # إرسال فوري، التأخير يتم معالجته داخل _process_and_forward_album
+        0,
         data={
-            "raw_media_data": raw_media_data, # نمرر البيانات الخام
-            "album_caption": album_caption,
+            "input_media_list": input_media_list,
             "user_chat_id": user_chat_id,
             "user_data_ref": context.user_data,
             "bot_instance": context.bot
@@ -599,43 +540,37 @@ async def _trigger_album_forward(update: Update, context: ContextTypes.DEFAULT_T
         name=job_name
     )
 
-    # تنظيف البيانات المؤقتة بعد جدولة المهمة
-    context.user_data.pop('current_album_raw_media_data', None)
-    context.user_data.pop('current_media_group_id', None)
-    context.user_data.pop('chosen_album_caption', None)
+    # بعد جدولة المهمة، استدعاء _process_next_album_in_queue لبدء معالجة الألبوم التالي (إن وجد)
+    await _process_next_album_in_queue(context.bot, user_chat_id, context.user_data, context.application)
 
 
 async def _process_and_forward_album_job(context: ContextTypes.DEFAULT_TYPE):
     """
     مهمة JobQueue لتحويل الألبوم فعلياً.
-    تُستدعى من JobQueue، لذلك تمرير البيانات يكون عبر context.job.data.
     """
     job_data = context.job.data
-    raw_media_data = job_data["raw_media_data"]
-    album_caption = job_data["album_caption"]
+    input_media_list = job_data["input_media_list"]
     user_chat_id_for_job = job_data["user_chat_id"]
     user_data_ref = job_data["user_data_ref"]
     bot_instance = job_data["bot_instance"]
 
     async with _forward_lock:
         await _process_and_forward_album(
-            raw_media_data,
-            album_caption,
+            input_media_list,
             user_chat_id_for_job,
             user_data_ref,
             bot_instance
         )
 
 
-async def _process_and_forward_album(raw_media_data: list, album_caption: str, user_chat_id: int, user_data: dict, bot_instance):
+async def _process_and_forward_album(input_media_list: list, user_chat_id: int, user_data: dict, bot_instance):
     """
-    وظيفة مساعدة لمعالجة وإرسال ألبوم (سواء كان مجموعة وسائط أو وسائط فردية).
-    تستقبل البوت و user_data كوسائط.
+    وظيفة مساعدة لمعالجة وإرسال ألبوم.
     """
     target_chat_id = user_data.get("album_destination_chat_id")
 
-    if not raw_media_data:
-        logger.warning(f"No raw media data to forward for user {user_chat_id}, skipping album process.")
+    if not input_media_list:
+        logger.warning(f"No input media items to forward for user {user_chat_id}, skipping album process.")
         return
     
     if target_chat_id is None:
@@ -654,21 +589,6 @@ async def _process_and_forward_album(raw_media_data: list, album_caption: str, u
 
     user_data['_last_forward_timestamp'] = time.time()
 
-    # بناء قائمة InputMedia objects هنا، قبل الإرسال مباشرة
-    input_media_list = []
-    for idx, media_data in enumerate(raw_media_data):
-        file_id = media_data['file_id']
-        media_type = media_data['type']
-        
-        current_caption = None
-        if idx == 0:
-             current_caption = album_caption # نستخدم التعليق الذي اختاره المستخدم
-        
-        if media_type == "photo":
-            input_media_list.append(InputMediaPhoto(media=file_id, caption=current_caption, parse_mode=ParseMode.HTML))
-        elif media_type == "video":
-            input_media_list.append(InputMediaVideo(media=file_id, caption=current_caption, supports_streaming=True, parse_mode=ParseMode.HTML))
-            
     logger.info(f"Forwarding album ({len(input_media_list)} items) to {target_chat_id}.")
 
     success, sent_messages = await send_media_group_with_backoff(
@@ -745,21 +665,17 @@ async def reset_bot_state(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data["temp_messages_to_clean"].clear()
 
     # مسح جميع البيانات المؤقتة المتعلقة بالتحويل النشط أو المعلق
-    context.user_data.pop('current_album_raw_media_data', None)
-    context.user_data.pop('current_media_group_id', None)
-    context.user_data.pop('chosen_album_caption', None)
+    context.user_data.pop('media_group_buffers', None)
+    context.user_data.pop('album_queue', None)
+    context.user_data.pop('is_processing_album', None)
     context.user_data.pop('_last_forward_timestamp', None)
 
-
+    # إلغاء أي مهام JobQueue معلقة
     if hasattr(context.application, 'job_queue') and context.application.job_queue is not None:
         jobs_to_cancel = [
-            job for job in context.application.job_queue.get_jobs_by_name(f"forward_album_.*")
+            job for job in context.application.job_queue.jobs()
             if job.data and job.data.get("user_chat_id") == chat_id
         ]
-        jobs_to_cancel.extend([
-            job for job in context.application.job_queue.get_jobs_by_name(f"final_collect_job_.*")
-            if job.data and job.data.get("user_chat_id") == chat_id
-        ])
         
         for job in jobs_to_cancel:
             job.schedule_removal()
@@ -774,60 +690,6 @@ async def reset_bot_state(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     await update.message.reply_text(
         MESSAGES["queue_cleared"],
-        reply_markup=reply_markup_main
-    )
-    return ConversationHandler.END
-
-
-async def cancel_current_album_process(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    يلغي محادثة التعليق الحالية وينظف البيانات ويعيد لوحة المفاتيح الرئيسية.
-    """
-    chat_id = update.effective_chat.id
-
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        chat_id = query.message.chat_id
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=query.message.message_id)
-        except BadRequest as e:
-            logger.debug(f"Message {query.message.message_id} not found when trying to delete.")
-        except Exception as e:
-            logger.warning(f"Error deleting query message in cancel_current_album_process: {e}")
-
-    await delete_messages_from_queue(context, chat_id)
-    await clear_all_temp_messages_after_delay(context.bot, chat_id, 0, context.user_data)
-    context.user_data["temp_messages_to_clean"].clear()
-
-    # مسح البيانات المؤقتة الخاصة بالتحويل الحالي
-    context.user_data.pop('current_album_raw_media_data', None)
-    context.user_data.pop('current_media_group_id', None)
-    context.user_data.pop('chosen_album_caption', None)
-
-    # إلغاء أي مهام JobQueue مرتبطة بهذا الألبوم الذي تم إلغاؤه
-    if hasattr(context.application, 'job_queue') and context.application.job_queue is not None:
-        jobs_to_cancel = [
-            job for job in context.application.job_queue.get_jobs_by_name(f"forward_album_.*")
-            if job.data and job.data.get("user_chat_id") == chat_id
-        ]
-        jobs_to_cancel.extend([
-            job for job in context.application.job_queue.get_jobs_by_name(f"final_collect_job_.*")
-            if job.data and job.data.get("user_chat_id") == chat_id
-        ])
-        for job in jobs_to_cancel:
-            job.schedule_removal()
-            logger.info(f"Cancelled job {job.name} for user {chat_id} during album process cancel.")
-
-    main_keyboard = [
-        [KeyboardButton(MESSAGES["keyboard_change_destination"])],
-        [KeyboardButton(MESSAGES["keyboard_clear"])]
-    ]
-    reply_markup_main = ReplyKeyboardMarkup(main_keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=MESSAGES["cancel_operation"],
         reply_markup=reply_markup_main
     )
     return ConversationHandler.END
@@ -908,45 +770,32 @@ def main() -> None:
         }
     )
 
-    # 2. ConversationHandler لعملية استقبال الألبوم واختيار التعليق ثم إرساله
-    album_forwarding_with_caption_conversation_handler = ConversationHandler(
+    # 2. ConversationHandler لعملية اختيار التعليق (تبدأ عندما يتم إرسال أزرار التعليق)
+    caption_conversation_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.PHOTO | filters.VIDEO, handle_incoming_media_and_start_flow),
+            # هذا الـ handler سيستقبل الـ CallbackQuery عندما تظهر الأزرار
+            CallbackQueryHandler(handle_caption_choice, pattern=f"^{CAPTION_CB_PREFIX}.*|^({CANCEL_CB_DATA})$"),
         ],
         states={
-            COLLECTING_MEDIA_GROUP: [
-                MessageHandler(filters.PHOTO | filters.VIDEO, handle_collecting_media_group),
-                CallbackQueryHandler(handle_caption_choice, pattern=f"^{CAPTION_CB_PREFIX}.*|^({CANCEL_CB_DATA})$"),
-                MessageHandler(filters.ALL & ~filters.COMMAND, cancel_current_album_process),
-            ],
-            ASKING_FOR_CAPTION: [
-                CallbackQueryHandler(handle_caption_choice, pattern=f"^{CAPTION_CB_PREFIX}.*|^({CANCEL_CB_DATA})$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: u.effective_message.reply_text(MESSAGES["invalid_input_choice"])),
-            ],
+            # في هذه الحالة نكون قد استقبلنا استجابة زر التعليق.
+            # الآن ننتقل إلى طلب التعليق اليدوي إذا تم اختيار هذا الخيار
             ASKING_FOR_MANUAL_CAPTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption),
             ],
+            # لا حاجة لـ ASKING_FOR_CAPTION هنا، لأن نقطة الدخول هي CallbackQuery مباشرةً.
         },
         fallbacks=[
-            MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$") & ~filters.COMMAND, reset_bot_state),
-            MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_destination'])}$") & ~filters.COMMAND, cancel_current_album_process),
-            CommandHandler("cancel", cancel_current_album_process),
-            CommandHandler("start", cancel_current_album_process),
-            CommandHandler("help", cancel_current_album_process),
-            CommandHandler("settings", cancel_current_album_process),
-            CommandHandler("source", cancel_current_album_process),
-            MessageHandler(filters.ALL & ~filters.COMMAND, cancel_current_album_process)
+            # إذا وصلت رسالة غير متوقعة (مثل نص بدلا من ضغط زر)
+            MessageHandler(filters.ALL & ~filters.COMMAND, cancel_operation_general) # استخدام إلغاء عام
         ],
-        map_to_parent={
-            ConversationHandler.END: ConversationHandler.END
-        }
+        conversation_timeout=60 # مهلة دقيقة للمحادثة
     )
 
 
     # إضافة Handlers إلى الـ Application
-    application.add_handler(destination_setting_conversation_handler)
-    application.add_handler(album_forwarding_with_caption_conversation_handler)
-
+    application.add_handler(destination_setting_conversation_handler) # معالج ضبط الوجهة
+    application.add_handler(caption_conversation_handler) # معالج اختيار التعليق
+    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, collect_media)) # معالج جمع الوسائط
 
     # الأوامر الرئيسية التي تعمل خارج المحادثات
     application.add_handler(CommandHandler("help", help_command))
