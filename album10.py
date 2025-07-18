@@ -326,10 +326,21 @@ async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TY
 
     # مسح البيانات المؤقتة الخاصة بالعملية الحالية
     context.user_data.pop("current_album_caption", None)
-    context.user_data.pop("progress_message_id", None)
     
-    # إعادة عرض لوحة المفاتيح بعد الانتهاء
-    await context.bot.send_message(chat_id, "✅ اكتملت العملية.", reply_markup=get_main_reply_markup())
+    # حذف رسالة التقدم بعد الانتهاء
+    progress_msg_id = context.user_data.pop("progress_message_id", None)
+    if progress_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=progress_msg_id)
+        except Exception:
+            pass # Ignore if it fails (already deleted, etc.)
+
+    # لا يتم إرسال أي رسالة هنا
+    
+    # إعادة عرض لوحة المفاتيح الرئيسية بصمت
+    # قد يكون ضروريا إذا تم إزالتها (مثل بعد إدخال التعليق اليدوي)
+    # لا توجد طريقة لإعادة لوحة المفاتيح بدون رسالة، لذلك سنتركها
+    # يمكن للمستخدم ببساطة إرسال صورة أخرى أو أمر للتعامل مع البوت
     
     return ConversationHandler.END
 
@@ -384,7 +395,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         
         # Update progress
         progress_msg_id = context.user_data.get("progress_message_id")
-        if progress_msg_id:
+        if progress_msg_id and total_albums > 1:
             try:
                 progress_text = f"{MESSAGES['processing_album_start']}\n"
                 progress_text += MESSAGES['progress_update'].format(processed_albums=index + 1, total_albums=total_albums, time_remaining_str="...")
