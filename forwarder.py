@@ -1,6 +1,6 @@
 import os
 import asyncio
-from pyrogram import Client, filters  # ✅ تم الاستيراد الآن
+from pyrogram import Client, filters
 from pyrogram.types import Message
 
 # ----- إعدادات من البيئة -----
@@ -34,26 +34,35 @@ async def handle_album(client: Client, message: Message):
         try:
             media_group = await app.get_media_group(BOT_ID, message.id)
 
-            # جمع معرفات الرسائل
-            message_ids = [m.id for m in media_group]
+            # جمع الوسائط
+            input_media = []
+            for msg in media_group:
+                if msg.photo:
+                    input_media.append(InputMediaPhoto(msg.photo.file_id))
+                elif msg.video:
+                    input_media.append(InputMediaVideo(msg.video.file_id))
 
-            # ⏳ تأخير 3 ثوانٍ قبل الإرسال إلى القناة
+            # ⏳ تأخير 3 ثوانٍ قبل الإرسال
             print(f"⏳ انتظر 3 ثوانٍ قبل إرسال الألبوم: {message.media_group_id}")
             await asyncio.sleep(3)
 
-            # إعادة توجيه الألبوم كاملاً إلى القناة
-            await app.forward_messages(TARGET_CHANNEL_ID, BOT_ID, message_ids)
-            print(f"✅ تم إعادة توجيه الألبوم كاملاً: {message.media_group_id}")
+            # إرسال الألبوم كرسالة جديدة (بدون إعادة توجيه)
+            if input_media:
+                await app.send_media_group(TARGET_CHANNEL_ID, input_media)
+                print(f"✅ تم إرسال الألبوم كاملاً بدون إظهار المرسل: {message.media_group_id}")
 
         except Exception as e:
-            print(f"❌ فشل في إعادة توجيه الألبوم: {e}")
+            print(f"❌ فشل في إرسال الألبوم: {e}")
     else:
-        # إذا لم يكن ألبومًا، أعد توجيه الرسالة العادية
+        # إذا لم يكن ألبومًا، أرسل كرسالة جديدة
         try:
-            await message.forward(TARGET_CHANNEL_ID)
-            print(f"✅ تم إعادة توجيه الرسالة الفردية: {message.id}")
+            if message.photo:
+                await app.send_photo(TARGET_CHANNEL_ID, message.photo.file_id)
+            elif message.video:
+                await app.send_video(TARGET_CHANNEL_ID, message.video.file_id)
+            print(f"✅ تم إرسال الرسالة الفردية بدون إظهار المرسل: {message.id}")
         except Exception as e:
-            print(f"❌ فشل في إعادة توجيه الرسالة: {e}")
+            print(f"❌ فشل في إرسال الرسالة: {e}")
 
 # ----- تشغيل العميل -----
 print("📡 البدء: جاري مراقبة الألبومات القادمة من البوت...")
