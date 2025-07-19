@@ -256,30 +256,27 @@ async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.warning(f"Failed to delete progress message or send final message: {e}")
 
-
+# في دالة execute_album_creation:
 async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يقوم بتقسيم قائمة الوسائط وإنشاء مجموعات الألبومات."""
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
     target_chat_id = context.user_data["album_destination_chat_id"]
     album_caption = context.user_data.get("current_album_caption", "")
-    split_mode = context.user_data.get("album_split_mode", "equal") # استرجاع النمط المحفوظ، الافتراضي 'equal'
+    split_mode = context.user_data.get("album_split_mode", "equal") 
     
     chunks = []
-    max_items_per_album = 10 # الحد الأقصى للملفات في ألبوم واحد
+    max_items_per_album = 10 
 
     if total_media == 0:
         return
 
     if split_mode == 'full_10':
-        # تقسيم إلى ألبومات بحد أقصى 10 عناصر
         chunks = [media_queue[i:i + max_items_per_album] for i in range(0, total_media, max_items_per_album)]
-    else: # split_mode == 'equal' (أو أي شيء آخر كافتراضي)
-        # تقسيم الوسائط بالتساوي على أقل عدد ممكن من الألبومات
-        # هذا يضمن أن الألبومات تكون متساوية قدر الإمكان حتى لو كان العدد الكلي لا يقسم على 10
+    else: 
         num_albums = math.ceil(total_media / max_items_per_album)
-        if num_albums == 0: # في حالة total_media < 10 وما زالت num_albums 0
-             num_albums = 1 # لضمان ألبوم واحد على الأقل
+        if num_albums == 0:
+             num_albums = 1
         
         base_size = total_media // num_albums
         rem = total_media % num_albums
@@ -291,30 +288,27 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
             chunks.append(media_queue[start_idx:start_idx + size])
             start_idx += size
 
-    for index, chunk in enumerate(chunks):
+    for index, chunk in enumerate(chunks): # index يمثل رقم الألبوم الحالي (0، 1، 2، ...)
         input_media = []
-        for i, item in enumerate(chunk):
+        for i, item in enumerate(chunk): # i يمثل رقم الوسيط داخل الألبوم الحالي (0، 1، 2، ...)
             if item["type"] == "photo":
-                # إضافة التعليق فقط لأول صورة في أول ألبوم في المجموعة
-                input_media.append(InputMediaPhoto(media=item["media"], caption=album_caption if i == 0 and index == 0 else None))
+                # الشرط الجديد: إضافة التعليق فقط لأول صورة في هذه الشريحة (هذا الألبوم)
+                input_media.append(InputMediaPhoto(media=item["media"], caption=album_caption if i == 0 else None))
             elif item["type"] == "video":
-                # إضافة التعليق فقط لأول فيديو في أول ألبوم في المجموعة
-                input_media.append(InputMediaVideo(media=item["media"], caption=album_caption if i == 0 and index == 0 else None))
+                # الشرط الجديد: إضافة التعليق فقط لأول فيديو في هذه الشريحة (هذا الألبوم)
+                input_media.append(InputMediaVideo(media=item["media"], caption=album_caption if i == 0 else None))
         
         try:
             await context.bot.send_media_group(chat_id=target_chat_id, media=input_media)
         except TelegramError as e:
             logger.error(f"Failed to send media group: {e}")
-            # يمكنك إضافة رسالة خطأ للمستخدم هنا إذا أردت
-            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ حدث خطأ أثناء إرسال الألبوم: {e}")
+            await context.bot.send_message(chat_id=target_chat_id, text=f"⚠️ حدث خطأ أثناء إرسال الألبوم: {e}")
 
-        # تأخير بين الألبومات إذا كان هناك أكثر من ألبوم واحد
         if index < len(chunks) - 1:
-            await asyncio.sleep(random.randint(5,20)) # تأخير عشوائي لمنع حظر API
+            await asyncio.sleep(random.randint(5,20))
 
-    context.user_data["media_queue"] = [] # تفريغ قائمة الوسائط بعد الإنشاء
+    context.user_data["media_queue"] = []
     logger.info(f"Successfully created {len(chunks)} albums.")
-
 
 # --- دوال مساعدة ---
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
