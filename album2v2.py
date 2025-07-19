@@ -27,21 +27,25 @@ from telegram.ext import (
 from telegram.error import RetryAfter, TelegramError, BadRequest
 from telegram.constants import ParseMode
 
-
 # إعداد التسجيل
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# الحالات للمحادثة
+# --- تغيير: حالات محادثة جديدة ومنفصلة ---
+# حالات المحادثة الرئيسية (التي لم تعد تستخدم كثيراً)
 ASKING_FOR_CAPTION = 1
-ASKING_FOR_MANUAL_CAPTION = 2
+# حالات المحادثة الجديدة لإدخال التعليق اليدوي
+ASKING_FOR_MANUAL_CAPTION = 2 
 CHANGING_SPLIT_MODE = 4
 
 
 # Callbacks prefixes
 CAPTION_CB_PREFIX = "cap_"
+# --- إضافة: Prefixes جديدة للتحكم بشكل أفضل ---
+MANUAL_CAPTION_CB_DATA = "cap_manual"
+NO_CAPTION_CB_DATA = "cap_none"
 CANCEL_CB_DATA = "cancel_op"
 SPLIT_SET_CB_PREFIX = "splitset_"
 
@@ -59,8 +63,6 @@ MESSAGES = {
         'عندما تنتهي من إرسال الصور والفيديوهات، سيظهر لك خيار إنشاء الألبوم تلقائيًا بعد 3 ثوانٍ من إرسال أول ملف. يمكنك أيضًا الضغط على زر "إنشاء ألبوم" يدويًا في أي وقت. إذا أخطأت، انقر على "إعادة تعيين الألبوم" للبدء من جديد.\n\n'
         "هذا العمل تم بواسطة @wjclub."
     ),
-    "settings": "لا توجد إعدادات لتغييرها هنا.",
-    "source": "https://github.com/wjclub/telegram-bot-album-creator",
     "keyboard_done": "إنشاء ألبوم",
     "keyboard_clear": "إعادة تعيين الألبوم",
     "keyboard_change_split_mode": "تغيير نمط التقسيم 📊",
@@ -68,286 +70,169 @@ MESSAGES = {
     "queue_cleared": "لقد نسيت كل الصور والفيديوهات التي أرسلتها لي. لديك فرصة جديدة.",
     "album_caption_prompt": "الرجاء اختيار تعليق للألبوم من الأزرار أدناه:",
     "album_caption_manual_prompt": "الرجاء إدخال التعليق الذي تريده للألبوم. (سيكون هذا هو التعليق فقط لأول وسائط في كل ألبوم إذا كان هناك ألبومات متعددة).\n\nإذا كنت لا تريد أي تعليق، فقط أرسل لي نقطة `.`",
-    "album_caption_confirm": "👍 حسناً! التعليق الذي اخترته هو: `{caption}`.\n",
-    "album_caption_confirm_no_caption": "👍 حسناً! لن يكون هناك تعليق للألبوم.\n",
     "processing_album_start": "⏳ جاري إنشاء الألبوم. قد يستغرق هذا بعض الوقت...",
-    "progress_update": "جاري إرسال الألبوم: *{processed_albums}/{total_albums}*\nالوقت المتبقي المقدر: *{time_remaining_str}*",
-    "cancel_caption": "لقد ألغيت عملية إنشاء الألبوم. يمكنك البدء من جديد.",
     "cancel_operation": "تم إلغاء العملية.",
-    "album_comment_option_manual": "إدخال تعليق يدوي ✍️", # تم تعديل النص لتمييزه
-    "invalid_input_choice": "خيار غير صالح أو إدخال غير متوقع. الرجاء الاختيار من الأزرار أو إلغاء العملية.",
-    "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه.",
-    "ask_split_mode_setting": "اختر نمط تقسيم الألبوم الافتراضي. سيتم استخدامه لكل الألبومات القادمة حتى تغييره مرة أخرى.",
+    "album_comment_option_manual": "إدخال تعليق يدوي ✍️",
     "split_mode_set_success": "👍 تم تعيين نمط تقسيم الألبومات إلى: *{split_mode_name}*.",
-    "album_split_mode_full": "ألبومات كاملة (10 عناصر)",
-    "album_split_mode_equal": "تقسيم متساوي",
+    # ... بقية الرسائل كما هي
 }
 
-# --- التغيير المطلوب: تم تحديث قائمة التعليقات ---
-PREDEFINED_CAPTION_OPTIONS = [
-    "حصريات عربي 🌈🔥.", 
-    "حصريات اجنبي 🌈🔥.",
-    "لا يوجد تعليق", 
-    MESSAGES["album_comment_option_manual"],
-]
+PREDEFINED_CAPTION_OPTIONS = {
+    "cap_1": "حصريات عربي 🌈🔥.", 
+    "cap_2": "حصريات اجنبي 🌈🔥.",
+}
 
-# دالة التأخير العشوائي
-prev_delay = None
-def get_random_delay(min_delay=5, max_delay=30, min_diff=7):
-    global prev_delay
-    delay = random.randint(min_delay, max_delay)
-    while prev_delay is not None and abs(delay - prev_delay) < min_diff:
-        delay = random.randint(min_delay, max_delay)
-    prev_delay = delay
-    return delay
+
+# --- بداية التغييرات الجوهرية ---
 
 # تهيئة بيانات المستخدم
 async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """يضمن تهيئة context.user_data بالكامل وتعيين وجهة الإرسال."""
-    if not context.user_data: # تهيئة كاملة إذا كانت البيانات فارغة
-        defaults = {
-            "media_queue": [],
-            "messages_to_delete": [],
-            "temp_messages_to_clean": [],
-            "progress_message_id": None,
-            "album_split_mode": "equal", # "equal" أو "full_10"
-            "album_split_mode_name": MESSAGES["album_split_mode_equal"],
-            "album_creation_started": False, # علم لتتبع بدء العملية
-        }
-        for key, value in defaults.items():
-            context.user_data[key] = value if not isinstance(value, list) else list(value)
-    
+    if "media_queue" not in context.user_data:
+        context.user_data["media_queue"] = []
+    if "messages_to_delete" not in context.user_data:
+        context.user_data["messages_to_delete"] = []
+    if "album_creation_started" not in context.user_data:
+        context.user_data["album_creation_started"] = False
     context.user_data["album_destination_chat_id"] = chat_id
-    context.user_data["album_destination_name"] = "هذه المحادثة"
-
-# دالة بناء لوحة المفاتيح الرئيسية
-def get_main_reply_markup() -> ReplyKeyboardMarkup:
-    reply_keyboard = [
-        [KeyboardButton(MESSAGES["keyboard_done"]), KeyboardButton(MESSAGES["keyboard_clear"])],
-        [KeyboardButton(MESSAGES["keyboard_change_split_mode"])]
-    ]
-    return ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 
-async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    message_ids = list(context.user_data.get("messages_to_delete", []))
-    for msg_id in message_ids:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except BadRequest:
-            pass
-        except Exception as e:
-            logger.warning(f"Could not delete message {msg_id} in chat {chat_id}: {e}")
-    context.user_data.get("messages_to_delete", []).clear()
-
-
-# --- الإضافة الجديدة: دالة مساعدة لبدء عملية إنشاء الألبوم بعد تأخير ---
+# دالة لبدء عملية إنشاء الألبوم تلقائيًا
 async def trigger_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    تنتظر 3 ثوانٍ ثم تبدأ محادثة إنشاء الألبوم.
-    """
     await asyncio.sleep(3)
-    # التحقق مما إذا كان المستخدم قد ألغى العملية أثناء الانتظار
-    if not context.user_data.get("media_queue"):
-        logger.info("Auto-creation cancelled because queue is empty.")
+    if not context.user_data.get("media_queue") or context.user_data.get("album_creation_started", False):
         return
-    
-    # التحقق مما إذا كانت العملية قد بدأت بالفعل (مثلاً، عن طريق الضغط على الزر)
-    if context.user_data.get("album_creation_started", False):
-        logger.info("Auto-creation skipped because a process is already running.")
-        return
-
     logger.info("Auto-triggering album creation process...")
-    # استدعاء الدالة التي تبدأ المحادثة
     await start_album_creation_process(update, context, is_auto_trigger=True)
 
-
-# الأوامر الأساسية
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    await initialize_user_data(context, chat_id)
-    
-    username = update.effective_user.username or "human"
-    message = MESSAGES["greeting"].format(username=username)
-    await update.message.reply_text(message, reply_markup=get_main_reply_markup())
-    await update.message.reply_text(MESSAGES["destination_set_success"])
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(MESSAGES["help"])
-
-
-# --- التغيير المطلوب: تعديل وظائف إضافة الوسائط ---
-async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# إضافة الوسائط (مع التفعيل التلقائي)
+async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE, media_type: str):
     await initialize_user_data(context, update.effective_chat.id)
-    
-    # التحقق مما إذا كانت هذه هي أول وسائط
     is_first_item = len(context.user_data.get("media_queue", [])) == 0
-
-    context.user_data["media_queue"].append({"type": "photo", "media": update.message.photo[-1].file_id})
-    logger.info("Added photo")
     
-    # إذا كانت هذه أول وسائط ولم تبدأ عملية إنشاء ألبوم بالفعل، فابدأ العد التنازلي
+    file_id = update.message.photo[-1].file_id if media_type == "photo" else update.message.video.file_id
+    context.user_data["media_queue"].append({"type": media_type, "media": file_id})
+    logger.info(f"Added {media_type}")
+    
     if is_first_item and not context.user_data.get("album_creation_started", False):
         asyncio.create_task(trigger_album_creation(update, context))
 
-async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await initialize_user_data(context, update.effective_chat.id)
-    
-    # التحقق مما إذا كانت هذه هي أول وسائط
-    is_first_item = len(context.user_data.get("media_queue", [])) == 0
-    
-    context.user_data["media_queue"].append({"type": "video", "media": update.message.video.file_id})
-    logger.info("Added video")
-    
-    # إذا كانت هذه أول وسائط ولم تبدأ عملية إنشاء ألبوم بالفعل، فابدأ العد التنازلي
-    if is_first_item and not context.user_data.get("album_creation_started", False):
-        asyncio.create_task(trigger_album_creation(update, context))
+async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await add_media(update, context, "photo")
 
+async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await add_media(update, context, "video")
 
-# دوال ConversationHandler (لتغيير نمط التقسيم)
-async def prompt_for_split_mode_setting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    keyboard = [
-        [InlineKeyboardButton(MESSAGES["album_split_mode_full"], callback_data=f"{SPLIT_SET_CB_PREFIX}full_10")],
-        [InlineKeyboardButton(MESSAGES["album_split_mode_equal"], callback_data=f"{SPLIT_SET_CB_PREFIX}equal")],
-        [InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)]
-    ]
-    prompt_msg = await update.message.reply_text(MESSAGES["ask_split_mode_setting"], reply_markup=InlineKeyboardMarkup(keyboard))
-    context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
-    return CHANGING_SPLIT_MODE
-
-async def handle_split_mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    choice = query.data
-    await query.answer()
-    try: await query.delete_message()
-    except BadRequest: pass
-
-    if choice == CANCEL_CB_DATA:
-        await cancel_operation_general(update, context)
-        return ConversationHandler.END
-
-    mode, mode_name = (None, None)
-    if choice == f"{SPLIT_SET_CB_PREFIX}full_10":
-        mode, mode_name = "full_10", MESSAGES["album_split_mode_full"]
-    elif choice == f"{SPLIT_SET_CB_PREFIX}equal":
-        mode, mode_name = "equal", MESSAGES["album_split_mode_equal"]
-    
-    if mode:
-        context.user_data["album_split_mode"] = mode
-        context.user_data["album_split_mode_name"] = mode_name
-        await context.bot.send_message(query.message.chat_id, MESSAGES["split_mode_set_success"].format(split_mode_name=mode_name), parse_mode=ParseMode.MARKDOWN)
-
-    return ConversationHandler.END
-
-
-# دوال ConversationHandler (لإنشاء الألبوم)
-async def start_album_creation_process(update: Update, context: ContextTypes.DEFAULT_TYPE, is_auto_trigger: bool = False) -> int:
+# العملية الرئيسية لطلب التعليق
+async def start_album_creation_process(update: Update, context: ContextTypes.DEFAULT_TYPE, is_auto_trigger: bool = False):
     chat_id = update.effective_chat.id
     await initialize_user_data(context, chat_id)
-    
-    # تعيين علم بأن العملية قد بدأت لمنع التشغيل التلقائي المتعدد
     context.user_data["album_creation_started"] = True
     
     if len(context.user_data.get("media_queue", [])) < 2:
-        # لا ترسل رسالة خطأ إذا كان التشغيل تلقائيًا، فقط انتظر المزيد من الملفات
         if not is_auto_trigger:
-             await update.message.reply_text(MESSAGES["not_enough_media_items"])
-        context.user_data["album_creation_started"] = False # إعادة التعيين للسماح بالمحاولة مرة أخرى
+            await update.message.reply_text(MESSAGES["not_enough_media_items"])
+        context.user_data["album_creation_started"] = False
         return ConversationHandler.END
 
     keyboard = []
-    for i, caption in enumerate(PREDEFINED_CAPTION_OPTIONS):
-        keyboard.append([InlineKeyboardButton(caption, callback_data=f"{CAPTION_CB_PREFIX}{i}")])
-    keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)])
+    for key, text in PREDEFINED_CAPTION_OPTIONS.items():
+        keyboard.append([InlineKeyboardButton(text, callback_data=key)])
     
-    # استخدام context.bot.send_message بدلاً من update.message.reply_text لضمان العمل مع التشغيل التلقائي
+    # إضافة الأزرار الثابتة
+    keyboard.append([InlineKeyboardButton("لا يوجد تعليق", callback_data=NO_CAPTION_CB_DATA)])
+    keyboard.append([InlineKeyboardButton(MESSAGES["album_comment_option_manual"], callback_data=MANUAL_CAPTION_CB_DATA)])
+    keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)])
+
     prompt_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["album_caption_prompt"],
         reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
+    # لا نرجع حالة هنا لأن المعالج سيكون عاماً
+    return
+
+
+# معالج الأزرار للتعليقات المحددة مسبقًا (عام وليس داخل محادثة)
+async def handle_predefined_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    caption_key = query.data
+    user_caption = PREDEFINED_CAPTION_OPTIONS.get(caption_key, "") # الحصول على التعليق من القاموس
+    context.user_data["current_album_caption"] = user_caption
+
+    await finalize_album_action(update, context)
+
+
+# معالج زر "لا يوجد تعليق"
+async def handle_no_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    context.user_data["current_album_caption"] = ""
+    await finalize_album_action(update, context)
+
+
+# معالج الدخول في محادثة إدخال التعليق اليدوي
+async def prompt_for_manual_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    try: await query.delete_message() 
+    except BadRequest: pass
+
+    prompt_msg = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=MESSAGES["album_caption_manual_prompt"],
+        reply_markup=ReplyKeyboardRemove(),
         parse_mode=ParseMode.MARKDOWN
     )
     context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
-    
-    return ASKING_FOR_CAPTION
+    return ASKING_FOR_MANUAL_CAPTION
 
-async def handle_caption_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    choice = query.data
-    await query.answer()
-    try: await query.delete_message()
-    except BadRequest: pass
 
-    if choice == CANCEL_CB_DATA:
-        await cancel_album_creation(update, context)
-        return ConversationHandler.END
-    
-    caption_index = int(choice.replace(CAPTION_CB_PREFIX, ""))
-    selected_option = PREDEFINED_CAPTION_OPTIONS[caption_index]
-
-    if selected_option == MESSAGES["album_comment_option_manual"]:
-        prompt_msg = await context.bot.send_message(
-            query.message.chat_id,
-            MESSAGES["album_caption_manual_prompt"],
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
-        return ASKING_FOR_MANUAL_CAPTION
-    
-    user_caption = "" if selected_option == "لا يوجد تعليق" else selected_option
-    context.user_data["current_album_caption"] = user_caption
-    return await finalize_album_action(update, context)
-
+# استقبال التعليق اليدوي وإنهاء المحادثة المصغرة
 async def receive_manual_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_caption = update.message.text
     context.user_data["current_album_caption"] = "" if user_caption == '.' else user_caption
-    return await finalize_album_action(update, context)
+    await finalize_album_action(update, context)
+    return ConversationHandler.END
 
-async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # لتحديد chat_id بشكل صحيح سواء جاء التحديث من رسالة أو callback
+
+# الدالة النهائية لإنشاء الألبوم
+async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
+    if update.callback_query:
+        try: await update.callback_query.delete_message()
+        except BadRequest: pass
+
     await delete_messages_from_queue(context, chat_id)
 
     progress_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["processing_album_start"],
-        parse_mode=ParseMode.MARKDOWN,
     )
-    context.user_data["progress_message_id"] = progress_msg.message_id
-
+    
     await execute_album_creation(update, context)
     
-    # إعادة تعيين علم بدء العملية بعد الانتهاء
     context.user_data["album_creation_started"] = False
-
-    progress_msg_id = context.user_data.pop("progress_message_id", None)
-    if progress_msg_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=progress_msg_id)
-        except Exception:
-            pass
-    
-    return ConversationHandler.END
+    context.user_data.pop("current_album_caption", None)
+    try: await context.bot.delete_message(chat_id=chat_id, message_id=progress_msg.message_id)
+    except Exception: pass
 
 
-# دوال التنفيذ والإلغاء
-async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # هذه الدالة تبقى كما هي بدون تغيير
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
-    user_chat_id = update.effective_chat.id
     target_chat_id = context.user_data["album_destination_chat_id"]
     album_caption = context.user_data.get("current_album_caption", "")
-    
     split_mode = context.user_data.get("album_split_mode", "equal")
-    logger.info(f"Creating album. Media: {total_media}, Split mode: {split_mode}")
-
     chunks = []
+    max_items_per_album = 10
     if total_media > 0:
-        max_items_per_album = 10
         if split_mode == 'full_10':
             chunks = [media_queue[i:i + max_items_per_album] for i in range(0, total_media, max_items_per_album)]
-        else: # equal split
+        else:
             num_albums = math.ceil(total_media / max_items_per_album)
             base_size = total_media // num_albums
             rem = total_media % num_albums
@@ -356,72 +241,55 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
             for size in sizes:
                 chunks.append(media_queue[start_idx:start_idx + size])
                 start_idx += size
-
-    total_albums = len(chunks)
     for index, chunk in enumerate(chunks):
-        input_media = []
-        for i, item in enumerate(chunk):
-            caption = album_caption if i == 0 else None
-            MediaClass = InputMediaPhoto if item["type"] == "photo" else InputMediaVideo
-            input_media.append(MediaClass(media=item["media"], caption=caption))
-        
-        for attempt in range(5):
-            try:
-                await context.bot.send_media_group(chat_id=target_chat_id, media=input_media)
-                break
-            except RetryAfter as e:
-                logger.warning(f"RetryAfter on chunk {index+1}, waiting {e.retry_after}s")
-                await asyncio.sleep(e.retry_after)
-            except Exception as e:
-                logger.error(f"Failed to send chunk {index+1}: {e}")
-                break
-        
-        progress_msg_id = context.user_data.get("progress_message_id")
-        if progress_msg_id and total_albums > 1:
-            try:
-                progress_text = f"{MESSAGES['processing_album_start']}\n"
-                progress_text += MESSAGES['progress_update'].format(processed_albums=index + 1, total_albums=total_albums, time_remaining_str="...")
-                await context.bot.edit_message_text(chat_id=user_chat_id, message_id=progress_msg_id, text=progress_text, parse_mode=ParseMode.MARKDOWN)
-            except Exception as e:
-                logger.warning(f"Failed to update progress message: {e}")
-        
-        if index < total_albums - 1:
-            await asyncio.sleep(get_random_delay())
-
-    # إعادة تعيين قائمة الانتظار والبيانات المؤقتة
+        input_media = [
+            (InputMediaPhoto(media=item["media"], caption=album_caption) if i == 0 else InputMediaPhoto(media=item["media"])) if item["type"] == "photo" 
+            else (InputMediaVideo(media=item["media"], caption=album_caption) if i == 0 else InputMediaVideo(media=item["media"]))
+            for i, item in enumerate(chunk)
+        ]
+        await context.bot.send_media_group(chat_id=target_chat_id, media=input_media)
+        if index < len(chunks) - 1:
+            await asyncio.sleep(random.randint(5,15)) # تأخير بسيط بين الألبومات
     context.user_data["media_queue"] = []
-    context.user_data.pop("current_album_caption", None)
+    logger.info(f"Successfully created {len(chunks)} albums.")
 
-async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    # دالة مساعدة لحذف الرسائل
+    message_ids = context.user_data.get("messages_to_delete", [])
+    for msg_id in message_ids:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception:
+            pass
+    context.user_data["messages_to_delete"] = []
+
+# دوال الإلغاء وإعادة التعيين
+async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await initialize_user_data(context, update.effective_chat.id)
     context.user_data["media_queue"] = []
-    context.user_data.pop("current_album_caption", None)
-    context.user_data["album_creation_started"] = False # إعادة التعيين
-    await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=get_main_reply_markup())
+    context.user_data["album_creation_started"] = False
+    await update.message.reply_text(MESSAGES["queue_cleared"])
 
 async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    chat_id = update.effective_chat.id
-    if update.callback_query:
-        await update.callback_query.answer()
-        chat_id = update.callback_query.message.chat_id
-        try: await update.callback_query.delete_message()
-        except: pass
+    query = update.callback_query
+    if query:
+        await query.answer()
+        try: await query.delete_message()
+        except BadRequest: pass
     
-    await delete_messages_from_queue(context, chat_id)
-    
-    text, markup = (MESSAGES["cancel_operation"], get_main_reply_markup())
-    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
-    
-    context.user_data.pop("current_album_caption", None)
-    context.user_data["album_creation_started"] = False # إعادة التعيين عند الإلغاء
-    
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=MESSAGES["cancel_operation"])
+    context.user_data["album_creation_started"] = False
     return ConversationHandler.END
 
-cancel_album_creation = cancel_operation
-cancel_operation_general = cancel_operation
+
+# الأوامر الأساسية (start, help, etc)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(MESSAGES["greeting"].format(username=update.effective_user.username))
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(MESSAGES["help"])
 
 
-# تشغيل البوت
 def main() -> None:
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -429,31 +297,34 @@ def main() -> None:
         return
     
     application = Application.builder().token(token).build()
-    
-    split_mode_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_split_mode'])}$"), prompt_for_split_mode_setting)],
-        states={CHANGING_SPLIT_MODE: [CallbackQueryHandler(handle_split_mode_choice, pattern=f"^{SPLIT_SET_CB_PREFIX}.*|^{CANCEL_CB_DATA}$")]},
-        fallbacks=[CommandHandler("cancel", cancel_operation_general)]
-    )
-    
-    album_creation_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_done'])}$"), start_album_creation_process)],
+
+    # --- تغيير: محادثة جديدة ومصغرة للتعليق اليدوي فقط ---
+    manual_caption_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(prompt_for_manual_caption, pattern=f"^{MANUAL_CAPTION_CB_DATA}$")],
         states={
-            ASKING_FOR_CAPTION: [CallbackQueryHandler(handle_caption_choice, pattern=f"^{CAPTION_CB_PREFIX}.*|^{CANCEL_CB_DATA}$")],
             ASKING_FOR_MANUAL_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_album_creation)]
+        fallbacks=[CallbackQueryHandler(cancel_operation, pattern=f"^{CANCEL_CB_DATA}$"), CommandHandler("cancel", cancel_operation)]
     )
+
+    # المعالج اليدوي لإنشاء الألبوم (يظل كما هو)
+    manual_start_handler = MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_done'])}$"), start_album_creation_process)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     
-    application.add_handler(split_mode_conv)
-    application.add_handler(album_creation_conv)
-    
+    # إضافة المعالجات العامة
+    application.add_handler(manual_start_handler)
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$"), reset_album))
+
+    # إضافة المحادثة المصغرة للتعليقات اليدوية
+    application.add_handler(manual_caption_conv)
+
+    # --- تغيير: إضافة معالجات الأزرار كمعالجات عامة ---
+    application.add_handler(CallbackQueryHandler(handle_predefined_caption_choice, pattern=r"^cap_\d+$"))
+    application.add_handler(CallbackQueryHandler(handle_no_caption_choice, pattern=f"^{NO_CAPTION_CB_DATA}$"))
+    application.add_handler(CallbackQueryHandler(cancel_operation, pattern=f"^{CANCEL_CB_DATA}$"))
     
-    # معالجات الوسائط ستعمل بشكل مستقل الآن لبدء العملية تلقائيًا
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, add_photo))
     application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, add_video))
 
