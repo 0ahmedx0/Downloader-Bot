@@ -35,11 +35,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # الحالات للمحادثة
-# إضافة حالة جديدة لبدء عملية الألبوم تلقائيًا
-INITIATING_ALBUM_AUTO = 0 # حالة جديدة لانتظار بدء الألبوم بعد التأخير
+# INITIATING_ALBUM_AUTO = 0 # تم إزالة هذه الحالة لأننا لم نعد نستخدمها بهذه الطريقة
 ASKING_FOR_CAPTION = 1
 ASKING_FOR_MANUAL_CAPTION = 2
-CHANGING_SPLIT_MODE = 4 # تم إزالة الحالة 3
+CHANGING_SPLIT_MODE = 4
 
 
 # Callbacks prefixes
@@ -115,7 +114,7 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
         "progress_message_id": None,
         "album_split_mode": "equal", # "equal" أو "full_10"
         "album_split_mode_name": MESSAGES["album_split_mode_equal"],
-        "auto_album_timer": None # لتخزين كائن المهمة
+        # "auto_album_timer": None # لم نعد بحاجة إلى هذا لـ JobQueue
     }
     for key, value in defaults.items():
         if key not in context.user_data:
@@ -162,10 +161,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(MESSAGES["help"])
 
 # -------------------------------------------------------------
-# دوال إضافة الوسائط مع المؤقت الجديد
+# دالة موحدة لإضافة الوسائط وبدء المؤقت
 # -------------------------------------------------------------
-async def _add_media_and_start_timer(update: Update, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> None:
+async def add_media_and_schedule_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> None:
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
     await initialize_user_data(context, chat_id)
 
     if media_type == "photo":
@@ -173,98 +173,28 @@ async def _add_media_and_start_timer(update: Update, context: ContextTypes.DEFAU
     elif media_type == "video":
         file_id = update.message.video.file_id
     else:
-        return # Should not happen
+        return
 
     context.user_data["media_queue"].append({"type": media_type, "media": file_id})
     logger.info(f"Added {media_type}. Queue size: {len(context.user_data['media_queue'])}")
 
-    # إذا كانت هذه أول وسائط في قائمة الانتظار، ابدأ المؤقت
-    if len(context.user_data["media_queue"]) == 1:
-        if context.user_data.get("auto_album_timer"):
-            # ألغِ المؤقت السابق إذا كان موجودًا (لإعادة التشغيل عند إضافة وسائط جديدة)
-            context.user_data["auto_album_timer"].cancel()
-            logger.info("Cancelled previous auto album timer.")
-
-        logger.info("Starting 2-second auto album timer.")
-        # ابدأ المهمة، ولا تنتظرها (مهمة خلفية)
-        context.user_data["auto_album_timer"] = asyncio.create_task(
-            _wait_and_prompt_for_caption(update, context)
-        )
-
-async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _add_media_and_start_timer(update, context, "photo")
-
-async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _add_media_and_start_timer(update, context, "video")
-
-async def _wait_and_prompt_for_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """انتظر ثانيتين ثم اطلب التعليق إذا كانت هناك وسائط كافية."""
-    await asyncio.sleep(2) # انتظر ثانيتين
-
-    chat_id = update.effective_chat.id
-
-    # تأكد أن الألبوم لا يزال يحتوي على وسائط كافية ولم يتم مسحها أو بدء العملية يدويًا
-    if context.user_data.get("media_queue") and len(context.user_data["media_queue"]) >= 1: # نطلب >= 1 لأنه قد يبدأ بـ 1، والحد الأدنى للإنشاء الفعلي هو 2. يمكننا تغيير هذا إلى 2
-        # تحقق من حالة المحادثة للتأكد من أنها ليست بالفعل في عملية إنشاء ألبوم (يدويًا)
-        # هذا يمنع تشغيل مطالبة التعليق التلقائية إذا ضغط المستخدم "إنشاء ألبوم" يدويًا خلال الثواني الـ 2
-        
-        # We need a way to make the bot enter the conversation for auto-prompt.
-        # This is tricky because ConversationHandler expects an entry_point handler.
-        # A workaround is to simulate the entry point for ConversationHandler if not already in one.
-        
-        # Check if we are already in an album creation state
-        current_state = context.user_data.get("_conversation_state", {}).get(album_creation_conv.name)
-        if current_state is None or current_state == ConversationHandler.END: # Not in conversation or it just ended
-            logger.info(f"Auto-prompting for album caption in chat {chat_id}")
-            # Simulate a start of conversation, transitioning to ASKING_FOR_CAPTION
-            context.user_data["auto_start_album_creation"] = True # Flag for the entry point
-            
-            # Call the handler directly to kick off the caption prompt
-            # It's not ideal as it bypasses the normal ConversationHandler flow slightly,
-            # but is a common pattern for "initiating" a conversation from an async task.
-            # The ConversationHandler's entry_point for `auto_album_initiation` will then handle it.
-            
-            # Create a dummy Update object if needed, or pass the existing one.
-            # For `prompt_for_album_caption_auto`, we don't strictly need a message update.
-            # We can use a custom context to identify the auto-initiation.
-            
-            # The `prompt_for_album_caption_auto` handler will need to check this flag.
-            
-            # The best way to enter an existing conversation handler is to "force" a state change,
-            # but that's a bit advanced. Let's simplify and make the manual_done trigger the auto-flow
-            # if the queue has media.
-            
-            # Let's remove this `_wait_and_prompt_for_caption` function as a separate task
-            # and integrate the auto-prompt into the `start_album_creation_process` or a similar
-            # handler triggered by the "Done" button implicitly.
-            
-            # New approach:
-            # Instead of a timer triggering a prompt, let the user continue sending media.
-            # When they click "Done" (or if we really want a timer-based auto-creation),
-            # the `start_album_creation_process` handler is where the choice of caption happens.
-            # The *request* was to display caption options 2 seconds after the *first* batch of videos.
-            # This implies the bot should automatically move to asking for a caption *without* user clicking "Done".
-            
-            # Let's make `prompt_for_album_caption_auto` directly initiate the `ASKING_FOR_CAPTION` state.
-            try:
-                # Set conversation state explicitly for the bot
-                context.user_data["_conversation_state"] = context.user_data.get("_conversation_state", {})
-                context.user_data["_conversation_state"][album_creation_conv.name] = ASKING_FOR_CAPTION
-                
-                # This ensures the current state is set. Now call the handler function.
-                await prompt_for_album_caption_auto(update, context)
-
-            except Exception as e:
-                logger.error(f"Error in auto-prompting for album: {e}")
-                # Reset conversation state if something went wrong during auto-prompt
-                context.user_data["_conversation_state"][album_creation_conv.name] = ConversationHandler.END
-
-        else:
-            logger.info(f"Already in an album creation conversation state: {current_state}. Skipping auto-prompt.")
-    else:
-        logger.info("Not enough media or queue cleared. Skipping auto-prompt.")
+    job_name = f"auto_album_prompt_{chat_id}"
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+        logger.info(f"Cancelled existing auto album job for {chat_id}.")
     
-    context.user_data["auto_album_timer"] = None # Clear timer reference
+    if len(context.user_data["media_queue"]) >= 1: 
+        context.job_queue.run_once(
+            callback=timeout_callback_auto_album_entry,
+            when=2,  # هذا هو الزمن الذي يمكنك تعديله
+            name=job_name,
+            chat_id=chat_id,
+            user_id=user_id,
+            data={"chat_id": chat_id, "user_id": user_id},
+        )
+        logger.info(f"Scheduled new auto album prompt job for chat {chat_id} in 2 seconds.")
+
 
 # -------------------------------------------------------------
 # دوال ConversationHandler (لتغيير نمط التقسيم)
@@ -276,7 +206,6 @@ async def prompt_for_split_mode_setting(update: Update, context: ContextTypes.DE
         [InlineKeyboardButton(MESSAGES["album_split_mode_equal"], callback_data=f"{SPLIT_SET_CB_PREFIX}equal")],
         [InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)]
     ]
-    # For a callback query update, reply to the message, for a command/message, reply to it
     if update.callback_query:
         await update.callback_query.answer()
         prompt_msg = await update.callback_query.message.reply_text(MESSAGES["ask_split_mode_setting"], reply_markup=InlineKeyboardMarkup(keyboard))
@@ -323,10 +252,11 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
     await initialize_user_data(context, chat_id)
     
     # ألغِ المؤقت التلقائي إذا ضغط المستخدم على زر "إنشاء ألبوم" يدويًا
-    if context.user_data.get("auto_album_timer"):
-        context.user_data["auto_album_timer"].cancel()
-        context.user_data["auto_album_timer"] = None
-        logger.info("Manual 'Done' button pressed, cancelled auto-album timer.")
+    job_name = f"auto_album_prompt_{chat_id}"
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+        logger.info(f"Manual 'Done' button pressed, cancelled auto-album job for {chat_id}.")
 
     if len(context.user_data["media_queue"]) < 2:
         await update.message.reply_text(MESSAGES["not_enough_media_items"], reply_markup=get_main_reply_markup())
@@ -348,7 +278,6 @@ async def prompt_for_album_caption(update: Update, context: ContextTypes.DEFAULT
     if auto_prompt:
         prompt_message = MESSAGES["auto_album_prompt"] # رسالة خاصة للبدء التلقائي
 
-    # حذف لوحة المفاتيح القديمة (لوحة المفاتيح الرد الأساسية) لعدم تداخلها مع لوحة مفاتيح inline الجديدة
     await context.bot.send_chat_action(chat_id=chat_id, action="typing") # إشارة أن البوت يعمل
     
     prompt_msg = await context.bot.send_message(
@@ -356,9 +285,6 @@ async def prompt_for_album_caption(update: Update, context: ContextTypes.DEFAULT
         text=prompt_message,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN,
-        # Reply to the user's last message if it's not a callback, or if update has a message object.
-        # Otherwise, just send it.
-        # It's better to send a new message for clarity and append its ID to `messages_to_delete`.
     )
     context.user_data["messages_to_delete"].append(prompt_msg.message_id)
     
@@ -501,16 +427,19 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     context.user_data.pop("current_album_caption", None)
     
     # ألغِ أي مؤقت تلقائي قيد التشغيل
-    if context.user_data.get("auto_album_timer"):
-        context.user_data["auto_album_timer"].cancel()
-        context.user_data["auto_album_timer"] = None
-        logger.info("Resetting queue, cancelled auto-album timer.")
+    job_name = f"auto_album_prompt_{chat_id}"
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+        logger.info(f"Resetting queue, cancelled auto-album job for {chat_id}.")
 
     await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=get_main_reply_markup())
     
     # تأكد من إنهاء أي محادثات جارية تخص الألبوم
-    if context.user_data.get("_conversation_state", {}).get(album_creation_conv.name):
-         context.user_data["_conversation_state"][album_creation_conv.name] = ConversationHandler.END
+    # Note: Accessing album_creation_conv here might be tricky if it's not global/passed correctly
+    # But usually, if it's defined at the module level before main, it's accessible.
+    if context.user_data.get("_conversation_state", {}).get("album_creation_conv"): # Use string name for robustness
+         context.user_data["_conversation_state"]["album_creation_conv"] = ConversationHandler.END
 
 
 async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -531,140 +460,112 @@ async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data.pop("current_album_caption", None)
 
     # Cancel auto album timer if active
-    if context.user_data.get("auto_album_timer"):
-        context.user_data["auto_album_timer"].cancel()
-        context.user_data["auto_album_timer"] = None
-        logger.info("Cancelled operation, cancelled auto-album timer.")
+    job_name = f"auto_album_prompt_{chat_id}"
+    current_jobs = context.job_queue.get_jobs_by_name(job_name)
+    for job in current_jobs:
+        job.schedule_removal()
+        logger.info(f"Cancelled operation, cancelled auto-album job for {chat_id}.")
 
     text, markup = (MESSAGES["cancel_operation"], get_main_reply_markup())
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
     
+    # تأكد من إنهاء أي محادثات جارية تخص الألبوم
+    if context.user_data.get("_conversation_state", {}).get("album_creation_conv"): # Use string name for robustness
+         context.user_data["_conversation_state"]["album_creation_conv"] = ConversationHandler.END
+
     return ConversationHandler.END
 
 cancel_album_creation = cancel_operation
 cancel_operation_general = cancel_operation
 
 
-async def timeout_callback_auto_album_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def timeout_callback_auto_album_entry(context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     هذا هو المعالج الذي سيتم تشغيله بواسطة مهمة المؤقت.
     يجب أن يتوافق مع نقطة دخول ConversationHandler.
     """
-    chat_id = context.job.chat_id # Chat ID is stored in job data
+    # الوصول إلى chat_id و user_id من job.data
+    chat_id = context.job.data.get("chat_id")
+    user_id = context.job.data.get("user_id")
+
+    if not chat_id or not user_id:
+        logger.error("Missing chat_id or user_id in job data for auto-album.")
+        return ConversationHandler.END
     
+    # للتأكد من تهيئة user_data بشكل صحيح في سياق المهمة
+    await initialize_user_data(context, chat_id)
+
     # Check if there's enough media and if the conversation is not already active
-    if context.user_data.get("media_queue") and len(context.user_data["media_queue"]) >= 2: # Min 2 for an album
-        current_state = context.user_data.get("_conversation_state", {}).get(album_creation_conv.name)
+    # For a timed auto-prompt, if there's 1 item, we can prompt, the system will later check for >= 2 for album creation.
+    if context.user_data.get("media_queue") and len(context.user_data["media_queue"]) >= 1:
+        # Access conversation state by its string name used in add_handler
+        current_state = context.user_data.get("_conversation_state", {}).get("album_creation_conv")
+        
+        # إذا لم يكن المستخدم في محادثة إنشاء ألبوم حاليًا
         if current_state is None or current_state == ConversationHandler.END:
             logger.info(f"Timeout triggered for auto album creation in chat {chat_id}. Prompting for caption.")
-            # We need to simulate an 'Update' object for `prompt_for_album_caption`
-            # which expects it for context and `effective_chat.id`.
-            # A dummy update based on chat_id is needed if `job.context` doesn't pass one.
-            # In job.run_async or job.run_once, you can pass context_args or chat_id directly.
             
-            # Since `job.run_once` can accept `chat_id`, we'll construct a dummy update
-            # within the handler or make `prompt_for_album_caption` handle a None update.
-            # The simplest is to modify `prompt_for_album_caption` to receive chat_id directly.
+            # إنشاء Update وهمي لتحقيق التوافق مع ConversationHandler
+            dummy_update = Update(update_id=random.randint(100000, 999999))
+            dummy_update._effective_chat = type('obj', (object,), {'id': chat_id, 'type': 'private'})()
+            dummy_update._effective_user = type('obj', (object,), {'id': user_id, 'first_name': 'BotUser'})()
+            
+            # يرجى ملاحظة: هنا سنطلب التعليق، وسيعيد `prompt_for_album_caption` `ASKING_FOR_CAPTION`.
+            # وظائف JobQueue لا تُعيد حاليًا للمحادثة، لذا سنضطر إلى التعديل يدويًا هنا.
+            # لا يمكننا إعادة `ConversationHandler.END` أو أي حالة مباشرة من `JobQueue` Callback.
+            # فقط استدعاء الدالة.
 
-            # We need to make sure context.user_data is accessible, which it is for `JobQueue` jobs.
+            # We need to manually set the conversation state for this chat_id before calling the prompt.
+            # The ConversationHandler automatically manages it if the entry_point is called through the dispatcher.
+            # But since JobQueue is calling it, we need to explicitly put the chat in the right state.
             
-            # Since `prompt_for_album_caption` also needs to reply to a specific message for some Update types,
-            # and here we're creating one from scratch, let's ensure it knows it's an auto-prompt.
-            
-            # Set the conversation state to trigger the `ASKING_FOR_CAPTION` flow.
-            # We need the chat_id from the job.
-            
-            # The ConversationHandler mechanism itself needs an entry point.
-            # This is where the complexity comes. JobQueue alone won't trigger ConversationHandler states.
-            # The ConversationHandler's entry points are `MessageHandler`, `CommandHandler`, etc.
-            # A JobQueue callback needs to *force* the state change or perform the actions.
-            
-            # Let's adjust: instead of a timer, let's say the user must click "Done" *after* sending their first batch.
-            # The original request "عندما يستلم اول دفعه فيديوهات بعدها ب 2 ثواني يعرض اختيار وصف"
-            # This is key: it's not on *any* subsequent video, but after the "first batch".
-            # The most practical way to interpret "first batch" is the first time the user starts sending media
-            # until a short pause or an explicit action.
-            
-            # Let's try to implement the explicit timer-triggered conversation entry again, carefully.
-            
-            # If a timeout fires and the user HASN'T clicked "Done" yet:
-            #   - Check if media_queue >= 2.
-            #   - If yes, proceed to ASKING_FOR_CAPTION state.
-            
-            # The key problem with JobQueue + ConversationHandler is `ConversationHandler` needs an `Update` object
-            # for its internal state management (e.g., `update.effective_chat.id`).
-            # `JobQueue` callbacks just get `context`.
-            
-            # To address this, the `timeout_callback_auto_album_entry` will manually call `prompt_for_album_caption`.
-            # We will ensure `prompt_for_album_caption` can accept `chat_id` directly without `update` object,
-            # or we will pass a dummy `update` object (less clean).
-            
-            # Let's refactor `prompt_for_album_caption` to take `chat_id` and `context`
-            # AND create a dummy `Update` object if none is provided.
+            # To enter the ConversationHandler properly from a Job,
+            # it's usually cleaner to trigger one of its entry_points.
+            # However, since `timeout_callback_auto_album_entry` is already the callback,
+            # we'll adapt. The main challenge is setting the correct state.
 
-            # Since ConversationHandler is difficult to enter externally, let's just make the JobQueue callback
-            # *directly* execute the `prompt_for_album_caption` logic.
-            # This won't set `ConversationHandler` state, so if the user sends more media, the conversation
-            # might not be in the right state.
-
-            # Simplest interpretation of "بعدها ب 2 ثواني يعرض اختيار وصف":
-            # Start timer after first media is received.
-            # If more media comes within 2s, reset timer.
-            # If 2s pass and no more media received, and there's media in queue, trigger prompt for caption.
-            # If user ignores prompt and sends more media, they'll have to manually hit "Done".
-            # If they interact with prompt, the album creation starts.
-
-            # We need to ensure that when `prompt_for_album_caption` is called from the timer,
-            # it puts the user in the `ASKING_FOR_CAPTION` state of the ConversationHandler.
+            # We will rely on `prompt_for_album_caption` to handle the actual sending
+            # and then `handle_caption_choice` will manage the state properly via callbacks.
             
-            # A cleaner way is to make the `_wait_and_prompt_for_caption` an `entry_point` handler
-            # which is then triggered by the JobQueue.
-            # This is also complicated.
+            # The *most robust* way for this setup is to ensure that when `timeout_callback_auto_album_entry`
+            # executes, it leads to `prompt_for_album_caption` being called, and then that the `ConversationHandler`
+            # is aware of the state.
 
-            # Let's go with the initial thought: A job triggers the next step.
-            # We need `user_id` from the job for `context.user_data`.
-            user_id = context.job.user_id 
-            chat_id = context.job.chat_id
+            # The current way: `prompt_for_album_caption` gets a `dummy_update`. It sends the message.
+            # The user interacts with the message, triggering `handle_caption_choice`.
+            # `handle_caption_choice` IS part of the conversation handler states.
+            # So, the ConversationHandler will pick it up from there. This is viable.
             
-            if user_id and chat_id:
-                # Need to explicitly set the conversation state here.
-                # Accessing user_data requires an `application` or `persistence`.
-                # Assuming `context.user_data` is automatically populated for the job.
+            # A key point: `timeout_callback_auto_album_entry` must not return a state for the ConversationHandler.
+            # It's a job, not a handler directly managing conversation flow for `ConversationHandler`.
+            # We are *initiating* the conversation.
+
+            # We need to ensure that the context for this specific chat_id is updated for the conversation.
+            # Python-telegram-bot often uses `context.application.dispatcher.process_update(dummy_update)`
+            # to make a dummy update enter the "normal" flow, which then triggers handlers including conv.
+            # However, directly calling handlers that set state can work if handled carefully.
+
+            try:
+                # Manually set the state in user_data, mimicking ConversationHandler entry
+                # This is an important step when triggering conversation states outside direct `Dispatcher` flow.
+                # It tells the ConversationHandler where this user *is*.
+                context.user_data["_conversation_state"]["album_creation_conv"] = ASKING_FOR_CAPTION
                 
-                # Create a dummy Update object to make ConversationHandler happy
-                # This is a hacky workaround, but sometimes necessary for complex flows.
-                dummy_update = Update(update_id=random.randint(100000, 999999))
-                # Populate `effective_chat` and `effective_user` for state tracking
-                dummy_update._effective_chat = type('obj', (object,), {'id': chat_id, 'type': 'private'})()
-                dummy_update._effective_user = type('obj', (object,), {'id': user_id, 'first_name': 'BotUser'})()
-                
-                # Now manually trigger the entry point for the album conversation handler
-                # This will call `start_album_creation_process`, but we want to go straight to caption.
-                
-                # Instead of a `_wait_and_prompt_for_caption` function that does the logic,
-                # let's modify the `add_photo/video` to schedule a Job that calls
-                # `start_album_creation_process` with a flag for auto-trigger.
+                await prompt_for_album_caption(dummy_update, context, auto_prompt=True)
 
-                # Let's make `start_album_creation_process` adaptable to being called by the timer.
-                
-                # The Job needs to call the *actual ConversationHandler entry point*.
-                # This means it needs to be `update.message.text = MESSAGES["keyboard_done"]` etc.
-                # This is bad.
+            except Exception as e:
+                logger.error(f"Error in auto-prompting for album: {e}")
+                # Reset conversation state if something went wrong
+                if context.user_data.get("_conversation_state", {}).get("album_creation_conv"):
+                    context.user_data["_conversation_state"]["album_creation_conv"] = ConversationHandler.END
 
-                # Final proposed solution for auto-prompting:
-                # `add_photo`/`add_video` adds to queue, and if it's the first media, it schedules a job for 2 seconds.
-                # This job, when it runs, will call a new function, say `auto_prompt_for_caption_entry`.
-                # This `auto_prompt_for_caption_entry` will be an `entry_point` for the `ConversationHandler`.
-                # If it's triggered, it immediately transitions to `ASKING_FOR_CAPTION`.
-
-                await prompt_for_album_caption(dummy_update, context, auto_prompt=True) # Now `prompt_for_album_caption` can receive `dummy_update`
-                return ASKING_FOR_CAPTION # Ensure this is the state for the conversation
         else:
-            logger.info(f"Auto-album job fired, but conversation is already in state {current_state}.")
+            logger.info(f"Auto-album job fired, but conversation for chat {chat_id} is already in state {current_state}. Skipping auto-prompt.")
     else:
-        logger.info("Auto-album job fired, but not enough media or queue was cleared.")
+        logger.info(f"Auto-album job fired for chat {chat_id}, but not enough media ({len(context.user_data.get('media_queue', []))} items) or queue cleared. Skipping auto-prompt.")
     
-    context.user_data["auto_album_timer"] = None # Clear timer reference
+    # context.user_data["auto_album_timer"] = None # لم نعد بحاجة لهذا لـ JobQueue
+
 
 # تشغيل البوت
 def main() -> None:
@@ -683,24 +584,17 @@ def main() -> None:
     )
 
     # محادثة لإنشاء الألبوم
-    # الآن سنضيف نقطة دخول أخرى للبدء التلقائي للمحادثة.
     album_creation_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_done'])}$"), start_album_creation_process),
-            # NEW ENTRY POINT: This handler is not directly triggered by a message/command
-            # but will be the 'destination' of the job queue timer when it kicks off the conversation.
-            # We need a handler that directly transitions to ASKING_FOR_CAPTION if timer triggered it.
-            # This is complex with ConversationHandler's entry points.
-
-            # Alternative (simpler): The timer simply calls `prompt_for_album_caption`
-            # and `handle_caption_choice` correctly manages state. This avoids forcing `entry_point`.
-            # Let's remove INITIATING_ALBUM_AUTO state for now.
+            # NO new entry points for auto-prompt, as JobQueue directly calls the handler and we set state.
         ],
         states={
             ASKING_FOR_CAPTION: [CallbackQueryHandler(handle_caption_choice, pattern=f"^{CAPTION_CB_PREFIX}.*|^{CANCEL_CB_DATA}$")],
             ASKING_FOR_MANUAL_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_album_creation)]
+        fallbacks=[CommandHandler("cancel", cancel_album_creation)],
+        name="album_creation_conv" # مهم لتتبع حالة المحادثة
     )
 
     application.add_handler(CommandHandler("start", start))
@@ -711,63 +605,10 @@ def main() -> None:
     application.add_handler(album_creation_conv)
     
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$"), reset_album))
-    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, add_photo))
-    application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, add_video))
     
-    # Add a job queue to the application. This is essential for the timer.
-    job_queue = application.job_queue
-
-    # Modified `_add_media_and_start_timer` to use `job_queue`
-    # We need to pass the `job_queue` object to `add_photo` and `add_video` or make it global/accessible.
-    # It's better to refactor `_add_media_and_start_timer` to directly use `context.job_queue`.
-
-    # Let's re-think `_add_media_and_start_timer`. It needs to cancel existing jobs if a new one is started.
-    # Each user should have their own timer job.
-    # We can use `context.job_queue.run_once` and pass `chat_id` and `user_id` as context.
-
-    # Modify `_add_media_and_start_timer` to manage the job queue.
-    # To do this, `add_photo` and `add_video` handlers must receive `context.job_queue` implicitly.
-    # When `application.run_polling()` is called, the `context` passed to handlers contains `job_queue`.
-
-    async def _add_media_and_start_timer_with_job(update: Update, context: ContextTypes.DEFAULT_TYPE, media_type: str) -> None:
-        chat_id = update.effective_chat.id
-        user_id = update.effective_user.id
-        await initialize_user_data(context, chat_id)
-
-        if media_type == "photo":
-            file_id = update.message.photo[-1].file_id
-        elif media_type == "video":
-            file_id = update.message.video.file_id
-        else:
-            return
-
-        context.user_data["media_queue"].append({"type": media_type, "media": file_id})
-        logger.info(f"Added {media_type}. Queue size: {len(context.user_data['media_queue'])}")
-
-        # Always cancel any pending auto-album job for this user/chat
-        job_name = f"auto_album_prompt_{chat_id}"
-        current_jobs = context.job_queue.get_jobs_by_name(job_name)
-        for job in current_jobs:
-            job.schedule_removal()
-            logger.info(f"Cancelled existing auto album job for {chat_id}.")
-        
-        # If there's at least one media (photo or video), schedule the auto-prompt.
-        # The logic for `not_enough_media_items` will be handled later when the album is actually created.
-        if len(context.user_data["media_queue"]) >= 1: # We want to prompt even if only 1 item initially, then notify if < 2
-            context.job_queue.run_once(
-                callback=timeout_callback_auto_album_entry,
-                when=3,  # 2 seconds
-                name=job_name,
-                chat_id=chat_id,
-                user_id=user_id,
-                data={"chat_id": chat_id, "user_id": user_id}, # Pass data for callback
-                # context.user_data is accessible in the job context, but explicit `data` is cleaner for chat/user IDs.
-            )
-            logger.info(f"Scheduled new auto album prompt job for chat {chat_id} in 2 seconds.")
-
-    # Re-map add_photo and add_video to the new function that handles the job queue.
-    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, lambda u, c: _add_media_and_start_timer_with_job(u, c, "photo")))
-    application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, lambda u, c: _add_media_and_start_timer_with_job(u, c, "video")))
+    # الآن سنقوم بربط معالجات الصور والفيديوهات بالدالة الموحدة الجديدة
+    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, lambda u, c: add_media_and_schedule_prompt(u, c, "photo")))
+    application.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, lambda u, c: add_media_and_schedule_prompt(u, c, "video")))
 
 
     logger.info("Bot started polling...")
