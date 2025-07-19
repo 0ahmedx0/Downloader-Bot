@@ -1,7 +1,7 @@
 import os
 import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message, InputMediaPhoto, InputMediaVideo  # ✅ تم الاستيراد الآن
+from pyrogram.types import Message, InputMediaPhoto, InputMediaVideo
 
 # ----- إعدادات من البيئة -----
 API_ID = os.getenv("API_ID")  # ← من my.telegram.org
@@ -34,33 +34,43 @@ async def handle_album(client: Client, message: Message):
         try:
             media_group = await app.get_media_group(BOT_ID, message.id)
 
-            # جمع الوسائط
+            # جمع الوسائط مع الحفاظ على التعليق
             input_media = []
+            caption_set = False
+
             for msg in media_group:
+                caption = msg.caption if not caption_set else None
+                if caption:
+                    caption_set = True
+
                 if msg.photo:
-                    input_media.append(InputMediaPhoto(msg.photo.file_id))
+                    input_media.append(InputMediaPhoto(msg.photo.file_id, caption=caption))
                 elif msg.video:
-                    input_media.append(InputMediaVideo(msg.video.file_id))
+                    input_media.append(InputMediaVideo(msg.video.file_id, caption=caption))
 
             # ⏳ تأخير 3 ثوانٍ قبل الإرسال
             print(f"⏳ انتظر 3 ثوانٍ قبل إرسال الألبوم: {message.media_group_id}")
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
 
             # إرسال الألبوم كرسالة جديدة (بدون إعادة توجيه)
             if input_media:
                 await app.send_media_group(TARGET_CHANNEL_ID, input_media)
-                print(f"✅ تم إرسال الألبوم كاملاً بدون إظهار المرسل: {message.media_group_id}")
+                print(f"✅ تم إرسال الألبوم كاملاً مع التعليق: {message.media_group_id}")
 
         except Exception as e:
             print(f"❌ فشل في إرسال الألبوم: {e}")
     else:
         # إذا لم يكن ألبومًا، أرسل كرسالة جديدة
         try:
-            if message.photo:
+            if message.photo and message.caption:
+                await app.send_photo(TARGET_CHANNEL_ID, message.photo.file_id, caption=message.caption)
+            elif message.photo:
                 await app.send_photo(TARGET_CHANNEL_ID, message.photo.file_id)
+            elif message.video and message.caption:
+                await app.send_video(TARGET_CHANNEL_ID, message.video.file_id, caption=message.caption)
             elif message.video:
                 await app.send_video(TARGET_CHANNEL_ID, message.video.file_id)
-            print(f"✅ تم إرسال الرسالة الفردية بدون إظهار المرسل: {message.id}")
+            print(f"✅ تم إرسال الرسالة الفردية مع التعليق: {message.id}")
         except Exception as e:
             print(f"❌ فشل في إرسال الرسالة: {e}")
 
