@@ -1,7 +1,7 @@
 import os
 import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InputMediaPhoto, InputMediaVideo  # ✅ تم الاستيراد الآن
 
 # ----- إعدادات من البيئة -----
 API_ID = os.getenv("API_ID")  # ← من my.telegram.org
