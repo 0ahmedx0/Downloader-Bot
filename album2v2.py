@@ -12,8 +12,8 @@ from telegram import (
     ReplyKeyboardRemove,
     InputMediaPhoto,
     InputMediaVideo,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
+    KeyboardButton, # تم استخدامها بالفعل، للتذكير
+    ReplyKeyboardMarkup, # تم استخدامها بالفعل، للتذكير
 )
 from telegram.ext import (
     Application,
@@ -74,8 +74,7 @@ MESSAGES = {
     "cancel_operation": "تم إلغاء العملية.",
     "album_comment_option_manual": "إدخال تعليق يدوي ✍️",
     "split_mode_set_success": "👍 تم تعيين نمط تقسيم الألبومات إلى: *{split_mode_name}*.",
-    # --- إضافة رسالة جديدة لإظهار لوحة المفاتيح ---
-    "first_item_added_prompt": "تمت إضافة الملف. يمكنك إضافة المزيد من الملفات أو استخدام الأزرار أدناه للتحكم في الألبوم."
+    # ... بقية الرسائل كما هي
 }
 
 PREDEFINED_CAPTION_OPTIONS = {
@@ -85,6 +84,18 @@ PREDEFINED_CAPTION_OPTIONS = {
 
 
 # --- بداية التغييرات الجوهرية ---
+
+# دالة مساعدة لإنشاء ReplyKeyboardMarkup
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [
+            KeyboardButton(MESSAGES["keyboard_done"]),
+            KeyboardButton(MESSAGES["keyboard_clear"]),
+            KeyboardButton(MESSAGES["keyboard_change_split_mode"]),
+        ]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
 
 # تهيئة بيانات المستخدم
 async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -99,7 +110,7 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
 # دالة لبدء عملية إنشاء الألبوم تلقائيًا
 async def trigger_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(3) # تم تغييرها من 1 إلى 3 ثواني لإعطاء وقت أفضل
+    await asyncio.sleep(1)
     if not context.user_data.get("media_queue") or context.user_data.get("album_creation_started", False):
         return
     logger.info("Auto-triggering album creation process...")
@@ -108,34 +119,19 @@ async def trigger_album_creation(update: Update, context: ContextTypes.DEFAULT_T
 # إضافة الوسائط (مع التفعيل التلقائي)
 async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE, media_type: str):
     await initialize_user_data(context, update.effective_chat.id)
-    # التحقق مما إذا كانت القائمة فارغة قبل الإضافة
-    is_first_item = not context.user_data.get("media_queue")
+    is_first_item = len(context.user_data.get("media_queue", [])) == 0
     
     file_id = update.message.photo[-1].file_id if media_type == "photo" else update.message.video.file_id
     context.user_data["media_queue"].append({"type": media_type, "media": file_id})
     logger.info(f"Added {media_type}")
     
-    # --- هنا هو الإصلاح ---
-    # إذا كان هذا هو أول ملف يتم إرساله، أظهر لوحة المفاتيح الرئيسية
-    if is_first_item:
-        keyboard = [
-            [KeyboardButton(MESSAGES["keyboard_done"])],
-            [KeyboardButton(MESSAGES["keyboard_clear"])],
-            [KeyboardButton(MESSAGES["keyboard_change_split_mode"])],
-        ]
-        reply_markup = ReplyKeyboardMarkup(
-            keyboard,
-            resize_keyboard=True,
-            one_time_keyboard=False  # لإبقاء اللوحة ظاهرة
-        )
+    # إصلاح ظهور الأزرار: أرسل لوحة المفاتيح الرئيسية عند إضافة أول وسائط
+    if is_first_item: # تأكد أننا لا نرسلها بعد كل وسيط
         await update.message.reply_text(
-            text=MESSAGES["first_item_added_prompt"],
-            reply_markup=reply_markup
+            "تم إضافة الوسائط! يمكنك إرسال المزيد أو استخدام الأزرار أدناه:",
+            reply_markup=get_main_keyboard()
         )
-
-    if not context.user_data.get("album_creation_started", False):
         asyncio.create_task(trigger_album_creation(update, context))
-
 
 async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await add_media(update, context, "photo")
@@ -147,18 +143,18 @@ async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_album_creation_process(update: Update, context: ContextTypes.DEFAULT_TYPE, is_auto_trigger: bool = False):
     chat_id = update.effective_chat.id
     await initialize_user_data(context, chat_id)
-    
-    # التحقق مما إذا كانت الأزرار قد تم النقر عليها يدويًا
-    is_manual_trigger = update.message and update.message.text == MESSAGES['keyboard_done']
+    context.user_data["album_creation_started"] = True
     
     if len(context.user_data.get("media_queue", [])) < 2:
-        # لا ترسل الرسالة إلا إذا كان التشغيل يدويًا
-        if is_manual_trigger:
-            await update.message.reply_text(MESSAGES["not_enough_media_items"])
+        if not is_auto_trigger:
+            # إصلاح: تأكد من إظهار لوحة المفاتيح الرئيسية إذا كان هناك خطأ
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=MESSAGES["not_enough_media_items"],
+                reply_markup=get_main_keyboard() 
+            )
         context.user_data["album_creation_started"] = False
-        return # لا نرجع ConversationHandler.END لأننا لسنا داخل محادثة
-
-    context.user_data["album_creation_started"] = True
+        return ConversationHandler.END
 
     keyboard = []
     for key, text in PREDEFINED_CAPTION_OPTIONS.items():
@@ -206,10 +202,11 @@ async def prompt_for_manual_caption(update: Update, context: ContextTypes.DEFAUL
     try: await query.delete_message() 
     except BadRequest: pass
 
+    # إصلاح: إزالة لوحة المفاتيح المؤقتة عند بدء الإدخال اليدوي
     prompt_msg = await context.bot.send_message(
         chat_id=query.message.chat_id,
         text=MESSAGES["album_caption_manual_prompt"],
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=ReplyKeyboardRemove(), # إزالة لوحة المفاتيح الرئيسية هنا
         parse_mode=ParseMode.MARKDOWN
     )
     context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
@@ -236,15 +233,24 @@ async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TY
     progress_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["processing_album_start"],
-        reply_markup=ReplyKeyboardRemove() # إزالة لوحة المفاتيح
     )
     
     await execute_album_creation(update, context)
     
     context.user_data["album_creation_started"] = False
     context.user_data.pop("current_album_caption", None)
-    try: await context.bot.delete_message(chat_id=chat_id, message_id=progress_msg.message_id)
-    except Exception: pass
+    
+    try: 
+        await context.bot.delete_message(chat_id=chat_id, message_id=progress_msg.message_id)
+        # إصلاح: بعد اكتمال الألبوم، أعد لوحة المفاتيح الرئيسية
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="الألبوم جاهز! يمكنك إرسال المزيد من الوسائط.",
+            reply_markup=get_main_keyboard()
+        )
+    except Exception: 
+        pass # إذا فشل حذف رسالة التقدم، استمر
+    
 
 
 async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,22 +301,22 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await initialize_user_data(context, update.effective_chat.id)
     context.user_data["media_queue"] = []
     context.user_data["album_creation_started"] = False
-    await update.message.reply_text(
-        MESSAGES["queue_cleared"],
-        reply_markup=ReplyKeyboardRemove() # إزالة الأزرار عند إعادة التعيين
-    )
+    # إصلاح: تأكد من إظهار لوحة المفاتيح الرئيسية بعد إعادة التعيين
+    await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=get_main_keyboard())
 
 async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    chat_id = update.effective_chat.id
     if query:
         await query.answer()
         try: await query.delete_message()
         except BadRequest: pass
     
+    # إصلاح: أعد لوحة المفاتيح الرئيسية بعد الإلغاء
     await context.bot.send_message(
-        chat_id=update.effective_chat.id, 
-        text=MESSAGES["cancel_operation"],
-        reply_markup=ReplyKeyboardRemove() # إزالة الأزرار عند الإلغاء
+        chat_id=chat_id, 
+        text=MESSAGES["cancel_operation"], 
+        reply_markup=get_main_keyboard()
     )
     context.user_data["album_creation_started"] = False
     return ConversationHandler.END
@@ -318,18 +324,21 @@ async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # الأوامر الأساسية (start, help, etc)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(MESSAGES["greeting"].format(username=update.effective_user.username))
+    # إصلاح: أرسل لوحة المفاتيح الرئيسية مع رسالة الترحيب
+    await update.message.reply_text(
+        MESSAGES["greeting"].format(username=update.effective_user.username),
+        reply_markup=get_main_keyboard()
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(MESSAGES["help"])
+    # إصلاح: أرسل لوحة المفاتيح الرئيسية مع رسالة المساعدة
+    await update.message.reply_text(MESSAGES["help"], reply_markup=get_main_keyboard())
 
 
 def main() -> None:
-    # --- هام جداً: استبدل "YOUR_BOT_TOKEN_HERE" بالتوكن الخاص بك ---
-    # أو قم بتعيينه كمتغير بيئة BOT_TOKEN
-    token = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-    if token == "YOUR_BOT_TOKEN_HERE":
-        logger.error("!!! BOT_TOKEN not set. Please replace 'YOUR_BOT_TOKEN_HERE' with your actual bot token. !!!")
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        logger.error("BOT_TOKEN not set in environment variables.")
         return
     
     application = Application.builder().token(token).build()
@@ -352,9 +361,8 @@ def main() -> None:
     # إضافة المعالجات العامة
     application.add_handler(manual_start_handler)
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$"), reset_album))
-    
-    # --- ملاحظة: زر "تغيير نمط التقسيم" لا يوجد له وظيفة بعد ---
-    # لإضافة وظيفة له، يجب إنشاء دالة جديدة وإضافتها كـ MessageHandler
+    # هنا يجب إضافة معالج لـ "تغيير نمط التقسيم" إذا كان لديك دالة له (الكود الأصلي لا يحتوي على دالة لهذا الزر).
+    # لغرض إصلاح ظهور الأزرار فقط، لم أضف معالجه، ولكن يجب عليك ربطه بدالة.
 
     # إضافة المحادثة المصغرة للتعليقات اليدوية
     application.add_handler(manual_caption_conv)
