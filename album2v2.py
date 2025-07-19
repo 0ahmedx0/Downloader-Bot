@@ -261,10 +261,6 @@ async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TY
     try: 
         await context.bot.delete_message(chat_id=chat_id, message_id=progress_msg.message_id)
         # لا نرسل لوحة المفاتيح الرئيسية هنا
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="الألبوم جاهز! يمكنك إرسال المزيد من الوسائط."
-        )
     except Exception as e:
         logger.warning(f"Failed to delete progress message or send final message: {e}")
 
