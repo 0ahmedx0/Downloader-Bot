@@ -1,5 +1,6 @@
-import os  # ✅ الاستيراد المطلوب
-from pyrogram import Client, filters
+import os
+import asyncio
+from pyrogram import Client
 from pyrogram.types import Message
 
 # ----- إعدادات من البيئة -----
@@ -32,11 +33,21 @@ async def handle_album(client: Client, message: Message):
         # جلب الألبوم كاملاً
         try:
             media_group = await app.get_media_group(BOT_ID, message.id)
-            message_ids = [m.id for m in media_group]
+
+            # جمع معرفات الرسائل
+            message_ids = [msg.id for msg in media_group]
+
+            # ⏳ تأخير 3 ثوانٍ قبل الإرسال إلى القناة
+            print(f"⏳ انتظر 3 ثوانٍ قبل إرسال الألبوم: {message.media_group_id}")
+            await asyncio.sleep(3)
+
+            # إعادة توجيه الألبوم كاملاً إلى القناة
             await app.forward_messages(TARGET_CHANNEL_ID, BOT_ID, message_ids)
             print(f"✅ تم إعادة توجيه الألبوم كاملاً: {message.media_group_id}")
+
         except Exception as e:
             print(f"❌ فشل في إعادة توجيه الألبوم: {e}")
+
     else:
         # إذا لم يكن ألبومًا، أعد توجيه الرسالة العادية
         try:
