@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # حالات المحادثة
 ASKING_FOR_CAPTION = 1 # لم تعد تستخدم كثيرًا
 ASKING_FOR_MANUAL_CAPTION = 2 
-CHANGING_SPLIT_MODE = 4 # حالة جديدة لتغيير نمط التقسيم
+CHANGING_SPLIT_MODE = 4 
 
 
 # Callbacks prefixes
@@ -45,7 +45,6 @@ MANUAL_CAPTION_CB_DATA = "cap_manual"
 NO_CAPTION_CB_DATA = "cap_none"
 CANCEL_CB_DATA = "cancel_op"
 
-# --- إضافة: Prefix جديد لأنماط التقسيم ---
 SPLIT_MODE_CB_PREFIX = "split_mode_"
 
 
@@ -56,11 +55,13 @@ MESSAGES = {
         "وأردت تجميعها في ألبوم، لكن لم ترغب في تنزيلها ثم إعادة رفعها؟ "
         "دعني أقوم بذلك بسرعة!\n\n"
         "أرسل لي أي صور أو فيديوهات وسأقوم بإنشاء ألبومات منها!\n\n"
+        "لإظهار الأزرار الرئيسية، يمكنك استخدام الأمر /keyboard."
     ),
     "destination_set_success": "👍 تم تعيين هذه الدردشة كوجهة تلقائية لإرسال الألبومات.",
     "help": (
         'عندما تنتهي من إرسال الصور والفيديوهات، سيظهر لك خيار إنشاء الألبوم تلقائيًا بعد 3 ثوانٍ من إرسال أول ملف. يمكنك أيضًا الضغط على زر "إنشاء ألبوم" يدويًا في أي وقت. إذا أخطأت، انقر على "إعادة تعيين الألبوم" للبدء من جديد.\n\n'
-        "هذا العمل تم بواسطة @wjclub."
+        "هذا العمل تم بواسطة @wjclub.\n\n"
+        "لإظهار الأزرار الرئيسية، يمكنك استخدام الأمر /keyboard."
     ),
     "keyboard_done": "إنشاء ألبوم",
     "keyboard_clear": "إعادة تعيين الألبوم",
@@ -74,9 +75,10 @@ MESSAGES = {
     "album_comment_option_manual": "إدخال تعليق يدوي ✍️",
     "split_mode_set_success": "👍 تم تعيين نمط تقسيم الألبومات إلى: *{split_mode_name}*.",
     "split_mode_prompt": "الرجاء اختيار نمط تقسيم الألبومات:",
-    # يمكنك إضافة أسماء الأنماط هنا لتكون مركزية
     "split_mode_name_equal": "تقسيم متساوي (قدر الإمكان)",
     "split_mode_name_full_10": "ألبوم من 10 (ثم جديد)",
+    "keyboard_shown": "هذه هي الأزرار الرئيسية:",
+    "keyboard_hidden": "تم إخفاء لوحة المفاتيح. لإظهارها مرة أخرى، استخدم الأمر /keyboard.",
 }
 
 PREDEFINED_CAPTION_OPTIONS = {
@@ -97,6 +99,20 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
+# دالة جديدة لإظهار الأزرار الرئيسية
+async def show_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        MESSAGES["keyboard_shown"],
+        reply_markup=get_main_keyboard()
+    )
+
+# دالة جديدة لإخفاء الأزرار الرئيسية
+async def hide_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        MESSAGES["keyboard_hidden"],
+        reply_markup=ReplyKeyboardRemove()
+    )
+
 
 # --- تهيئة بيانات المستخدم ---
 async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -107,7 +123,6 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     if "album_creation_started" not in context.user_data:
         context.user_data["album_creation_started"] = False
     context.user_data["album_destination_chat_id"] = chat_id
-    # تعيين نمط التقسيم الافتراضي إذا لم يكن موجودًا
     if "album_split_mode" not in context.user_data:
         context.user_data["album_split_mode"] = "equal" # الافتراضي: تقسيم متساوي
 
@@ -130,12 +145,10 @@ async def add_media(update: Update, context: ContextTypes.DEFAULT_TYPE, media_ty
     context.user_data["media_queue"].append({"type": media_type, "media": file_id})
     logger.info(f"Added {media_type}")
     
-    # إظهار لوحة المفاتيح الرئيسية بعد إضافة أول وسيط
+    # لا نقوم بإظهار لوحة المفاتيح الرئيسية تلقائياً هنا
     if is_first_item and not context.user_data.get("album_creation_started", False):
-        await update.message.reply_text(
-            "تم إضافة الوسائط! يمكنك إرسال المزيد أو استخدام الأزرار أدناه:",
-            reply_markup=get_main_keyboard()
-        )
+        # يمكن إرسال رسالة نصية بسيطة للمستخدم أن الوسائط قد أضيفت
+        # await update.message.reply_text("تم إضافة أول ملف وسائط.")
         # تشغيل الإنشاء التلقائي للألبوم بعد إضافة أول ملف
         asyncio.create_task(trigger_album_creation(update, context))
 
@@ -149,26 +162,23 @@ async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- عملية إنشاء الألبوم: طلب التعليق ---
 async def start_album_creation_process(update: Update, context: ContextTypes.DEFAULT_TYPE, is_auto_trigger: bool = False):
     chat_id = update.effective_chat.id
-    await initialize_user_data(context, chat_id) # تأكد من تهيئة البيانات
+    await initialize_user_data(context, chat_id)
 
-    # إذا كانت عملية إنشاء الألبوم قد بدأت بالفعل أو لم يكن هناك وسائط، تجاهل الطلب
     if context.user_data.get("album_creation_started", False):
-        return ConversationHandler.END # أو لا تفعل شيئًا إذا كانت قادمة من تفعيل تلقائي
+        return
     
-    # تحقق من عدد عناصر الوسائط
     if len(context.user_data.get("media_queue", [])) < 2:
-        if not is_auto_trigger: # لا ترد برسالة إذا كان التفعيل تلقائيا لمنع إزعاج المستخدم
+        if not is_auto_trigger:
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=MESSAGES["not_enough_media_items"],
-                reply_markup=get_main_keyboard() # إعادة الأزرار الرئيسية
+                reply_markup=ReplyKeyboardRemove() # تأكد من إخفاءها إن كانت موجودة
             )
         context.user_data["album_creation_started"] = False
-        return ConversationHandler.END
+        return
 
-    context.user_data["album_creation_started"] = True # تعيين علامة بدء العملية
+    context.user_data["album_creation_started"] = True 
 
-    # بناء أزرار اختيار التعليق
     keyboard = []
     for key, text in PREDEFINED_CAPTION_OPTIONS.items():
         keyboard.append([InlineKeyboardButton(text, callback_data=key)])
@@ -177,15 +187,15 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
     keyboard.append([InlineKeyboardButton("لا يوجد تعليق", callback_data=NO_CAPTION_CB_DATA)])
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)])
 
-    # إرسال رسالة طلب التعليق مع InlineKeyboard
     prompt_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["album_caption_prompt"],
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    # إضافة الرسالة لقائمة الرسائل التي سيتم حذفها لاحقًا
+    # تأكد من إزالة ReplyKeyboard عندما تظهر InlineKeyboard
+    await context.bot.send_message(chat_id=chat_id, text="...", reply_markup=ReplyKeyboardRemove())
     context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
-    return # لا نرجع حالة هنا، المعالج يعالج CallbackQueries
+    return
 
 
 # --- معالجات اختيار التعليق ---
@@ -209,15 +219,14 @@ async def handle_no_caption_choice(update: Update, context: ContextTypes.DEFAULT
 async def prompt_for_manual_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    # حاول حذف رسالة طلب التعليق (Inline Keyboard)
     try: await query.delete_message() 
     except BadRequest: pass
 
-    # طلب التعليق اليدوي وإزالة ReplyKeyboard مؤقتًا
+    # إزالة لوحة المفاتيح الرئيسية عند بدء الإدخال اليدوي
     prompt_msg = await context.bot.send_message(
         chat_id=query.message.chat_id,
         text=MESSAGES["album_caption_manual_prompt"],
-        reply_markup=ReplyKeyboardRemove(), # إزالة لوحة المفاتيح الرئيسية هنا
+        reply_markup=ReplyKeyboardRemove(),
         parse_mode=ParseMode.MARKDOWN
     )
     context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
@@ -233,30 +242,33 @@ async def receive_manual_album_caption(update: Update, context: ContextTypes.DEF
 # --- تنفيذ إنشاء الألبوم فعليًا ---
 async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    # حاول حذف رسالة لوحة المفاتيح Inline (في حال وجود Query)
     if update.callback_query:
         try: await update.callback_query.delete_message()
         except BadRequest: pass
 
-    await delete_messages_from_queue(context, chat_id) # حذف الرسائل القديمة
+    await delete_messages_from_queue(context, chat_id)
 
     progress_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["processing_album_start"],
     )
     
-    await execute_album_creation(update, context) # تنفيذ الإنشاء الفعلي
+    await execute_album_creation(update, context)
     
     context.user_data["album_creation_started"] = False
     context.user_data.pop("current_album_caption", None)
     
-    # حذف رسالة التقدم وإعادة لوحة المفاتيح الرئيسية
     try: 
         await context.bot.delete_message(chat_id=chat_id, message_id=progress_msg.message_id)
+        # لا نرسل لوحة المفاتيح الرئيسية هنا
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="الألبوم جاهز! يمكنك إرسال المزيد من الوسائط."
+        )
     except Exception as e:
         logger.warning(f"Failed to delete progress message or send final message: {e}")
 
-# في دالة execute_album_creation:
+
 async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يقوم بتقسيم قائمة الوسائط وإنشاء مجموعات الألبومات."""
     media_queue = context.user_data.get("media_queue", [])
@@ -288,14 +300,14 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
             chunks.append(media_queue[start_idx:start_idx + size])
             start_idx += size
 
-    for index, chunk in enumerate(chunks): # index يمثل رقم الألبوم الحالي (0، 1، 2، ...)
+    for index, chunk in enumerate(chunks):
         input_media = []
-        for i, item in enumerate(chunk): # i يمثل رقم الوسيط داخل الألبوم الحالي (0، 1، 2، ...)
+        for i, item in enumerate(chunk):
             if item["type"] == "photo":
-                # الشرط الجديد: إضافة التعليق فقط لأول صورة في هذه الشريحة (هذا الألبوم)
+                # التعليق على أول وسيط في كل ألبوم
                 input_media.append(InputMediaPhoto(media=item["media"], caption=album_caption if i == 0 else None))
             elif item["type"] == "video":
-                # الشرط الجديد: إضافة التعليق فقط لأول فيديو في هذه الشريحة (هذا الألبوم)
+                # التعليق على أول وسيط في كل ألبوم
                 input_media.append(InputMediaVideo(media=item["media"], caption=album_caption if i == 0 else None))
         
         try:
@@ -309,6 +321,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
 
     context.user_data["media_queue"] = []
     logger.info(f"Successfully created {len(chunks)} albums.")
+
 
 # --- دوال مساعدة ---
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -326,8 +339,8 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await initialize_user_data(context, update.effective_chat.id)
     context.user_data["media_queue"] = []
     context.user_data["album_creation_started"] = False
-    # إعادة الأزرار الرئيسية بعد إعادة التعيين
-    await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=get_main_keyboard())
+    # لا نرسل لوحة المفاتيح الرئيسية هنا
+    await update.message.reply_text(MESSAGES["queue_cleared"])
 
 async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """يلغي أي عملية حالية ويعيد الأزرار الرئيسية."""
@@ -336,26 +349,20 @@ async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if query:
         await query.answer()
-        # حاول حذف الرسالة التي تحتوي على زر الإلغاء (إذا كان زر Inline)
         try: await query.delete_message()
         except BadRequest: pass
-    else: # إذا تم استدعاؤها عبر أمر /cancel مثلاً
-        # يمكن إرسال رد برسالة "تم الإلغاء" هنا
-        pass
     
-    # تفريغ قائمة الوسائط والحالات
     context.user_data["media_queue"] = []
     context.user_data["album_creation_started"] = False
     context.user_data.pop("current_album_caption", None)
-    context.user_data["messages_to_delete"] = [] # تأكد من مسح الرسائل للحذف
+    context.user_data["messages_to_delete"] = [] 
 
-    # إرسال رسالة إلغاء وإعادة لوحة المفاتيح الرئيسية
     await context.bot.send_message(
         chat_id=chat_id, 
         text=MESSAGES["cancel_operation"], 
-        reply_markup=get_main_keyboard()
+        # لا نرسل لوحة المفاتيح الرئيسية هنا
     )
-    return ConversationHandler.END # إنهاء أي ConversationHandler حالي
+    return ConversationHandler.END
 
 
 # --- دوال تغيير نمط التقسيم ---
@@ -370,15 +377,16 @@ async def change_split_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # إرسال رسالة بطلب اختيار نمط التقسيم
+    # تأكد من إزالة ReplyKeyboard عندما تظهر InlineKeyboard
+    await update.message.reply_text("...", reply_markup=ReplyKeyboardRemove())
+
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=MESSAGES["split_mode_prompt"],
         reply_markup=reply_markup,
     )
-    # إضافة الرسالة لقائمة الرسائل التي سيتم حذفها لاحقًا
     context.user_data.get("messages_to_delete", []).append(msg.message_id)
-    return CHANGING_SPLIT_MODE # ندخل في حالة ConversationHandler الجديدة
+    return CHANGING_SPLIT_MODE
 
 async def set_split_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """يعالج اختيار المستخدم لنمط التقسيم من InlineKeyboard."""
@@ -387,12 +395,10 @@ async def set_split_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = query.message.chat_id
 
     chosen_mode = query.data.replace(SPLIT_MODE_CB_PREFIX, "")
-    context.user_data["album_split_mode"] = chosen_mode # حفظ النمط في بيانات المستخدم
+    context.user_data["album_split_mode"] = chosen_mode 
 
-    # عرض اسم النمط المناسب للمستخدم
     mode_name_display = MESSAGES["split_mode_name_equal"] if chosen_mode == "equal" else MESSAGES["split_mode_name_full_10"]
     
-    # تعديل رسالة الأزرار لعرض التأكيد وإزالة الأزرار Inline
     await context.bot.edit_message_text(
         chat_id=chat_id,
         message_id=query.message.message_id,
@@ -401,49 +407,46 @@ async def set_split_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=None # إزالة أزرار Inline بعد الاختيار
     )
     
-    # بعد الاختيار، يجب أن تظهر لوحة المفاتيح الرئيسية مرة أخرى
+    # لا نرسل لوحة المفاتيح الرئيسية هنا
     await context.bot.send_message(
         chat_id=chat_id, 
-        text="تم تعيين نمط التقسيم.", 
-        reply_markup=get_main_keyboard()
+        text="تم تعيين نمط التقسيم."
     )
-    context.user_data.get("messages_to_delete", []).clear() # مسح قائمة الرسائل للحذف
-    return ConversationHandler.END # إنهاء محادثة تغيير النمط
+    context.user_data.get("messages_to_delete", []).clear() 
+    return ConversationHandler.END
 
 
 # --- الأوامر الأساسية (start, help) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يرسل رسالة الترحيب مع الأزرار الرئيسية."""
+    """يرسل رسالة الترحيب."""
     await update.message.reply_text(
         MESSAGES["greeting"].format(username=update.effective_user.username),
-        reply_markup=get_main_keyboard()
+        reply_markup=ReplyKeyboardRemove() # تأكيد إزالة لوحة المفاتيح
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يرسل رسالة المساعدة مع الأزرار الرئيسية."""
-    await update.message.reply_text(MESSAGES["help"], reply_markup=get_main_keyboard())
+    """يرسل رسالة المساعدة."""
+    await update.message.reply_text(MESSAGES["help"], reply_markup=ReplyKeyboardRemove())
 
 
 def main() -> None:
     token = os.getenv("BOT_TOKEN")
     if not token:
         logger.error("BOT_TOKEN not set in environment variables.")
-        raise ValueError("BOT_TOKEN environment variable not set.") # ارفع خطأ لإيقاف التشغيل إذا لم يكن هناك توكن
+        raise ValueError("BOT_TOKEN environment variable not set.")
     
     application = Application.builder().token(token).build()
 
     # --- محادثات ConversationHandler ---
-    # محادثة اختيار التعليق اليدوي
     manual_caption_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(prompt_for_manual_caption, pattern=f"^{MANUAL_CAPTION_CB_DATA}$")],
         states={
             ASKING_FOR_MANUAL_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_album_caption)],
         },
         fallbacks=[CallbackQueryHandler(cancel_operation, pattern=f"^{CANCEL_CB_DATA}$"), CommandHandler("cancel", cancel_operation)],
-        allow_reentry=True # تسمح بالدخول للمحادثة حتى لو كانت فعالة
+        allow_reentry=True
     )
 
-    # محادثة تغيير نمط التقسيم
     split_mode_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_split_mode'])}$"), change_split_mode)
@@ -461,11 +464,14 @@ def main() -> None:
     # --- إضافة المعالجات العامة للـ Application ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    
-    # معالجات أزرار ReplyKeyboard
+    application.add_handler(CommandHandler("keyboard", show_keyboard)) # الأمر الجديد لإظهار الأزرار
+    application.add_handler(CommandHandler("hidekeyboard", hide_keyboard)) # أمر إضافي لإخفاء الأزرار يدوياً
+
+
+    # معالجات أزرار ReplyKeyboard (التي تضغط من قبل المستخدم عندما تكون ظاهرة)
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_done'])}$"), start_album_creation_process))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_clear'])}$"), reset_album))
-    # Note: the 'change_split_mode' button is now handled by split_mode_conv's entry_points
+    # زر "تغيير نمط التقسيم" تتم معالجته بواسطة ConversationHandler split_mode_conv
 
     # إضافة ConversationHandlers
     application.add_handler(manual_caption_conv)
