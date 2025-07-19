@@ -98,7 +98,7 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
 # دالة لبدء عملية إنشاء الألبوم تلقائيًا
 async def trigger_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
     if not context.user_data.get("media_queue") or context.user_data.get("album_creation_started", False):
         return
     logger.info("Auto-triggering album creation process...")
@@ -249,7 +249,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         ]
         await context.bot.send_media_group(chat_id=target_chat_id, media=input_media)
         if index < len(chunks) - 1:
-            await asyncio.sleep(random.randint(5,15)) # تأخير بسيط بين الألبومات
+            await asyncio.sleep(random.randint(5,20)) # تأخير بسيط بين الألبومات
     context.user_data["media_queue"] = []
     logger.info(f"Successfully created {len(chunks)} albums.")
 
