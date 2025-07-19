@@ -98,7 +98,7 @@ async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
 
 # دالة لبدء عملية إنشاء الألبوم تلقائيًا
 async def trigger_album_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await asyncio.sleep(3)
+    await asyncio.sleep(2)
     if not context.user_data.get("media_queue") or context.user_data.get("album_creation_started", False):
         return
     logger.info("Auto-triggering album creation process...")
