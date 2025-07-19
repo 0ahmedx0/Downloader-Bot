@@ -1,3 +1,4 @@
+import os  # ✅ الاستيراد المطلوب
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
@@ -43,3 +44,7 @@ async def handle_album(client: Client, message: Message):
             print(f"✅ تم إعادة توجيه الرسالة الفردية: {message.id}")
         except Exception as e:
             print(f"❌ فشل في إعادة توجيه الرسالة: {e}")
+
+# ----- تشغيل العميل -----
+print("📡 البدء: جاري مراقبة الألبومات القادمة من البوت...")
+app.run()
