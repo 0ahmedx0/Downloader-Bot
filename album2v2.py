@@ -193,8 +193,10 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     # تأكد من إزالة ReplyKeyboard عندما تظهر InlineKeyboard
-    await context.bot.send_message(chat_id=chat_id, text="", reply_markup=ReplyKeyboardRemove())
+    # إضافة الرسالة ذات النقطة لقائمة الحذف
+    dot_msg = await context.bot.send_message(chat_id=chat_id, text=".", reply_markup=ReplyKeyboardRemove())
     context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
+    context.user_data.get("messages_to_delete", []).append(dot_msg.message_id) # هذا هو التغيير هنا
     return
 
 
@@ -219,8 +221,17 @@ async def handle_no_caption_choice(update: Update, context: ContextTypes.DEFAULT
 async def prompt_for_manual_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    try: await query.delete_message() 
-    except BadRequest: pass
+    # يتم حذف الرسائل التي تحمل InlineKeyboard بالفعل في دالة finalize_album_action
+    # لذلك لا داعي لحذف رسالة prompt_msg هنا إن أضفتها لقائمة الحذف.
+    # ولكن إذا كنت تريد حذفها فورًا، فيمكنك الإبقاء على هذا:
+    try: 
+        # تأكد أن prompt_msg موجودة في messages_to_delete ومحذوفة
+        # إذا لم يتم حذفها بعد في query.delete_message()، فقد تكون موجودة.
+        # من الأفضل ترك عملية الحذف في finalize_album_action لضمان إزالة كل الرسائل
+        # ولكن لحذف زر ال InlineKeyboardMarkup (السؤال عن الكابشن) فوراً
+        await query.delete_message() 
+    except BadRequest: 
+        pass
 
     # إزالة لوحة المفاتيح الرئيسية عند بدء الإدخال اليدوي
     prompt_msg = await context.bot.send_message(
@@ -235,6 +246,13 @@ async def prompt_for_manual_caption(update: Update, context: ContextTypes.DEFAUL
 async def receive_manual_album_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_caption = update.message.text
     context.user_data["current_album_caption"] = "" if user_caption == '.' else user_caption
+    
+    # حذف الرسالة التي تحتوي على التعليق اليدوي الذي أرسله المستخدم
+    try:
+        await update.message.delete()
+    except BadRequest as e:
+        logger.warning(f"Failed to delete user's caption message: {e}")
+
     await finalize_album_action(update, context)
     return ConversationHandler.END
 
@@ -243,9 +261,11 @@ async def receive_manual_album_caption(update: Update, context: ContextTypes.DEF
 async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     if update.callback_query:
-        try: await update.callback_query.delete_message()
+        # هذه الخطوة مهمة: حذف رسالة ال InlineKeyboard التي تحتوي على خيارات التعليق
+        try: await update.callback_query.message.delete()
         except BadRequest: pass
 
+    # الآن نحذف أي رسائل أخرى تم تخزينها للحذف، بما في ذلك رسالة "." ورسالة طلب التعليق اليدوي.
     await delete_messages_from_queue(context, chat_id)
 
     progress_msg = await context.bot.send_message(
@@ -323,12 +343,16 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
 async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """تحذف الرسائل التي تم تخزين IDs الخاص بها في قائمة الحذف."""
     message_ids = context.user_data.get("messages_to_delete", [])
-    for msg_id in message_ids:
+    # قم بنسخ القائمة لتجنب مشاكل التعديل أثناء المرور
+    ids_to_delete = list(message_ids) 
+    for msg_id in ids_to_delete:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except BadRequest as e: # Catch BadRequest specifically for messages that might already be deleted
+            logger.debug(f"Could not delete message {msg_id} (already deleted or access denied): {e}")
         except Exception as e:
             logger.warning(f"Failed to delete message {msg_id}: {e}")
-    context.user_data["messages_to_delete"] = []
+    context.user_data["messages_to_delete"] = [] # امسح القائمة بعد الحذف
 
 # --- دوال الإلغاء وإعادة التعيين ---
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -337,6 +361,7 @@ async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["album_creation_started"] = False
     # لا نرسل لوحة المفاتيح الرئيسية هنا
     await update.message.reply_text(MESSAGES["queue_cleared"])
+    await delete_messages_from_queue(context, update.effective_chat.id) # إضافة حذف الرسائل المعلقة هنا أيضاً
 
 async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """يلغي أي عملية حالية ويعيد الأزرار الرئيسية."""
@@ -345,13 +370,18 @@ async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if query:
         await query.answer()
-        try: await query.delete_message()
-        except BadRequest: pass
+        try: 
+            # نحاول حذف رسالة الكولباك، قد تكون الرسالة نفسها هي رسالة "."
+            await query.message.delete()
+        except BadRequest: 
+            pass # قد تكون الرسالة حذفت بالفعل
     
     context.user_data["media_queue"] = []
     context.user_data["album_creation_started"] = False
     context.user_data.pop("current_album_caption", None)
-    context.user_data["messages_to_delete"] = [] 
+    
+    # حذف أي رسائل متبقية في قائمة messages_to_delete
+    await delete_messages_from_queue(context, chat_id)
 
     await context.bot.send_message(
         chat_id=chat_id, 
@@ -374,7 +404,9 @@ async def change_split_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     # تأكد من إزالة ReplyKeyboard عندما تظهر InlineKeyboard
-    await update.message.reply_text("...", reply_markup=ReplyKeyboardRemove())
+    # الرسالة التي تظهر عند الضغط على زر "تغيير نمط التقسيم" لا يجب أن تحتوي على ".
+    # ولكن إذا كنت تريد إرسال رسالة نصية قصيرة وحذفها:
+    # await update.message.reply_text("...", reply_markup=ReplyKeyboardRemove())
 
     msg = await context.bot.send_message(
         chat_id=chat_id,
@@ -395,20 +427,27 @@ async def set_split_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     mode_name_display = MESSAGES["split_mode_name_equal"] if chosen_mode == "equal" else MESSAGES["split_mode_name_full_10"]
     
-    await context.bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=query.message.message_id,
-        text=MESSAGES["split_mode_set_success"].format(split_mode_name=mode_name_display),
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=None # إزالة أزرار Inline بعد الاختيار
-    )
-    
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=query.message.message_id,
+            text=MESSAGES["split_mode_set_success"].format(split_mode_name=mode_name_display),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=None # إزالة أزرار Inline بعد الاختيار
+        )
+    except Exception as e:
+        logger.warning(f"Failed to edit message in set_split_mode: {e}")
+        # إذا فشل التعديل، أرسل رسالة جديدة بدلاً من ذلك.
+        await context.bot.send_message(
+            chat_id=chat_id, 
+            text=MESSAGES["split_mode_set_success"].format(split_mode_name=mode_name_display),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
     # لا نرسل لوحة المفاتيح الرئيسية هنا
-    await context.bot.send_message(
-        chat_id=chat_id, 
-        text="تم تعيين نمط التقسيم."
-    )
-    context.user_data.get("messages_to_delete", []).clear() 
+    # الرسالة "تم تعيين نمط التقسيم." ليست بحاجة إلى إرسال إذا كانت رسالة التعديل كافية
+    # ويمكن حذف أي رسائل أخرى تم تخزينها
+    await delete_messages_from_queue(context, chat_id)
     return ConversationHandler.END
 
 
