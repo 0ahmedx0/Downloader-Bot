@@ -193,7 +193,7 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     # تأكد من إزالة ReplyKeyboard عندما تظهر InlineKeyboard
-    await context.bot.send_message(chat_id=chat_id, reply_markup=ReplyKeyboardRemove())
+    await context.bot.send_message(chat_id=chat_id, text="", reply_markup=ReplyKeyboardRemove())
     context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
     return
 
