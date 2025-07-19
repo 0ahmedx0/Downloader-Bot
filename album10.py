@@ -37,13 +37,11 @@ logger = logging.getLogger(__name__)
 # الحالات للمحادثة
 ASKING_FOR_CAPTION = 1
 ASKING_FOR_MANUAL_CAPTION = 2
-SETTING_GLOBAL_DESTINATION = 3
-CHANGING_SPLIT_MODE = 4
+CHANGING_SPLIT_MODE = 4 # تم إزالة الحالة 3
 
 
 # Callbacks prefixes
 CAPTION_CB_PREFIX = "cap_"
-SEND_LOC_CB_PREFIX = "sendloc_"
 CANCEL_CB_DATA = "cancel_op"
 SPLIT_SET_CB_PREFIX = "splitset_"
 
@@ -56,12 +54,7 @@ MESSAGES = {
         "دعني أقوم بذلك بسرعة!\n\n"
         "أرسل لي أي صور أو فيديوهات وسأقوم بإنشاء ألبومات منها!\n\n"
     ),
-    "initial_setup_prompt": (
-        "قبل البدء، الرجاء تحديد وجهة إرسال الألبومات بشكل دائم.\n"
-        "يمكنك تغيير هذا الخيار في أي وقت لاحقاً باستخدام زر 'تغيير وجهة الألبوم'."
-    ),
-    "destination_set_success": "👍 تم تعيين وجهة الألبوم الخاصة بك إلى: *{destination_name}*.",
-    "destination_not_set_error": "لم يتم تحديد وجهة إرسال الألبوم بعد. الرجاء الضغط على زر '*تغيير وجهة الألبوم*' لتحديدها أولاً.",
+    "destination_set_success": "👍 تم تعيين هذه الدردشة كوجهة تلقائية لإرسال الألبومات.",
     "help": (
         'فقط قم بتحويل أو إرسال صور وفيديوهات متعددة. عندما تنتهي، اضغط على زر "إنشاء ألبوم" '
         'وستحصل على جميع ملفاتك التي أرسلتها مسبقاً مجمعة كألبومات. إذا أخطأت، انقر على "إعادة تعيين الألبوم" للبدء من جديد.\n\n'
@@ -71,7 +64,7 @@ MESSAGES = {
     "source": "https://github.com/wjclub/telegram-bot-album-creator",
     "keyboard_done": "إنشاء ألبوم",
     "keyboard_clear": "إعادة تعيين الألبوم",
-    "keyboard_change_destination": "تغيير وجهة الألبوم 🔄",
+    "keyboard_change_split_mode": "تغيير نمط التقسيم 📊",
     "not_enough_media_items": "📦 تحتاج إلى إرسال صورتين أو أكثر لتكوين ألبوم.",
     "queue_cleared": "لقد نسيت كل الصور والفيديوهات التي أرسلتها لي. لديك فرصة جديدة.",
     "album_caption_prompt": "الرجاء اختيار تعليق للألبوم من الأزرار أدناه:",
@@ -83,13 +76,8 @@ MESSAGES = {
     "cancel_caption": "لقد ألغيت عملية إنشاء الألبوم. يمكنك البدء من جديد.",
     "cancel_operation": "تم إلغاء العملية.",
     "album_comment_option_manual": "إدخال تعليق يدوي",
-    "ask_send_location": "أين تود إرسال الألبوم؟",
-    "send_to_channel_button": "القناة 📢",
-    "send_to_chat_button": "المحادثة معي 👤",
-    "channel_id_missing": "❌ لم يتم ضبط معرف القناة (CHANNEL_ID) في بيئة البوت. لا يمكن الإرسال بالقناة.",
     "invalid_input_choice": "خيار غير صالح أو إدخال غير متوقع. الرجاء الاختيار من الأزرار أو إلغاء العملية.",
     "success_message_permanent_prompt": "يمكنك الآن إرسال المزيد من الوسائط أو استخدام الأزرار أدناه.",
-    "keyboard_change_split_mode": "تغيير نمط التقسيم 📊",
     "ask_split_mode_setting": "اختر نمط تقسيم الألبوم الافتراضي. سيتم استخدامه لكل الألبومات القادمة حتى تغييره مرة أخرى.",
     "split_mode_set_success": "👍 تم تعيين نمط تقسيم الألبومات إلى: *{split_mode_name}*.",
     "album_split_mode_full": "ألبومات كاملة (10 عناصر)",
@@ -115,27 +103,30 @@ def get_random_delay(min_delay=5, max_delay=30, min_diff=7):
     return delay
 
 # تهيئة بيانات المستخدم
-async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE):
-    """يضمن تهيئة context.user_data بالكامل."""
+async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """يضمن تهيئة context.user_data بالكامل وتعيين وجهة الإرسال."""
     defaults = {
         "media_queue": [],
         "messages_to_delete": [],
         "temp_messages_to_clean": [],
         "progress_message_id": None,
-        "album_destination_chat_id": None,
-        "album_destination_name": None,
         "album_split_mode": "equal", # "equal" أو "full_10"
         "album_split_mode_name": MESSAGES["album_split_mode_equal"]
     }
     for key, value in defaults.items():
         if key not in context.user_data:
             context.user_data[key] = value if not isinstance(value, list) else list(value)
+    
+    # تعيين وجهة الإرسال تلقائيًا إلى الدردشة الحالية دائمًا
+    context.user_data["album_destination_chat_id"] = chat_id
+    context.user_data["album_destination_name"] = "هذه المحادثة"
 
 # دالة بناء لوحة المفاتيح الرئيسية
 def get_main_reply_markup() -> ReplyKeyboardMarkup:
+    # تم إزالة زر تغيير الوجهة
     reply_keyboard = [
         [KeyboardButton(MESSAGES["keyboard_done"]), KeyboardButton(MESSAGES["keyboard_clear"])],
-        [KeyboardButton(MESSAGES["keyboard_change_destination"]), KeyboardButton(MESSAGES["keyboard_change_split_mode"])]
+        [KeyboardButton(MESSAGES["keyboard_change_split_mode"])]
     ]
     return ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
 
@@ -153,71 +144,33 @@ async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id
 
 # الأوامر الأساسية
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await initialize_user_data(context)
+    chat_id = update.effective_chat.id
+    await initialize_user_data(context, chat_id)
+    
     username = update.effective_user.username or "human"
     message = MESSAGES["greeting"].format(username=username)
     await update.message.reply_text(message, reply_markup=get_main_reply_markup())
-    if context.user_data.get("album_destination_chat_id") is None:
-        await prompt_for_destination_setting(update, context, initial_setup=True)
-
+    
+    # إرسال رسالة تأكيد بأن الوجهة تم تحديدها تلقائيًا
+    await update.message.reply_text(MESSAGES["destination_set_success"])
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(MESSAGES["help"])
 
 # إضافة الوسائط
 async def add_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await initialize_user_data(context)
+    await initialize_user_data(context, update.effective_chat.id)
     context.user_data["media_queue"].append({"type": "photo", "media": update.message.photo[-1].file_id})
     logger.info("Added photo")
 
 async def add_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await initialize_user_data(context)
+    await initialize_user_data(context, update.effective_chat.id)
     context.user_data["media_queue"].append({"type": "video", "media": update.message.video.file_id})
     logger.info("Added video")
 
 # -------------------------------------------------------------
-# دوال ConversationHandler (لتغيير الإعدادات)
+# دوال ConversationHandler (لتغيير نمط التقسيم)
 # -------------------------------------------------------------
-
-async def prompt_for_destination_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial_setup: bool = False) -> int:
-    keyboard = [
-        [InlineKeyboardButton(MESSAGES["send_to_channel_button"], callback_data=f"{SEND_LOC_CB_PREFIX}channel")],
-        [InlineKeyboardButton(MESSAGES["send_to_chat_button"], callback_data=f"{SEND_LOC_CB_PREFIX}chat")],
-        [InlineKeyboardButton("❌ إلغاء", callback_data=CANCEL_CB_DATA)]
-    ]
-    message_text = (MESSAGES["initial_setup_prompt"] + "\n\n" if initial_setup else "") + MESSAGES["ask_send_location"]
-    prompt_msg = await update.effective_chat.send_message(message_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
-    context.user_data.get("messages_to_delete", []).append(prompt_msg.message_id)
-    return SETTING_GLOBAL_DESTINATION
-
-async def handle_global_destination_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    choice = query.data
-    chat_id = query.message.chat_id
-    await query.answer()
-    try: await query.delete_message()
-    except BadRequest: pass
-
-    if choice == CANCEL_CB_DATA:
-        await cancel_operation_general(update, context)
-        return ConversationHandler.END
-
-    send_chat_id, dest_name = (None, None)
-    if choice == f"{SEND_LOC_CB_PREFIX}channel":
-        send_chat_id_env = os.getenv("CHANNEL_ID")
-        if not send_chat_id_env:
-            await context.bot.send_message(chat_id, MESSAGES["channel_id_missing"])
-            return ConversationHandler.END
-        send_chat_id, dest_name = (int(send_chat_id_env), MESSAGES["send_to_channel_button"])
-    elif choice == f"{SEND_LOC_CB_PREFIX}chat":
-        send_chat_id, dest_name = (chat_id, MESSAGES["send_to_chat_button"])
-
-    context.user_data["album_destination_chat_id"] = send_chat_id
-    context.user_data["album_destination_name"] = dest_name
-    await context.bot.send_message(chat_id, MESSAGES["destination_set_success"].format(destination_name=dest_name), parse_mode=ParseMode.MARKDOWN)
-    return ConversationHandler.END
-
-
 async def prompt_for_split_mode_setting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """تطلب من المستخدم اختيار إعداد التقسيم الدائم."""
     keyboard = [
@@ -254,7 +207,6 @@ async def handle_split_mode_choice(update: Update, context: ContextTypes.DEFAULT
 
     return ConversationHandler.END
 
-
 # -------------------------------------------------------------
 # دوال ConversationHandler (لإنشاء الألبوم)
 # -------------------------------------------------------------
@@ -262,13 +214,11 @@ async def start_album_creation_process(update: Update, context: ContextTypes.DEF
     """
     الخطوة الأولى لإنشاء الألبوم: تتحقق من كل شيء وتطلب التعليق مباشرة.
     """
-    await initialize_user_data(context)
     chat_id = update.effective_chat.id
+    await initialize_user_data(context, chat_id)
     
-    if context.user_data["album_destination_chat_id"] is None:
-        await update.message.reply_text(MESSAGES["destination_not_set_error"])
-        return ConversationHandler.END
-
+    # لم يعد هناك حاجة للتحقق من وجهة الإرسال لأنها تُضبط تلقائيًا
+    
     if len(context.user_data["media_queue"]) < 2:
         await update.message.reply_text(MESSAGES["not_enough_media_items"])
         return ConversationHandler.END
@@ -313,7 +263,7 @@ async def receive_manual_album_caption(update: Update, context: ContextTypes.DEF
 
 async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     chat_id = update.effective_chat.id
-    await delete_messages_from_queue(context, chat_id) # حذف الرسائل القديمة
+    await delete_messages_from_queue(context, chat_id)
 
     progress_msg = await context.bot.send_message(
         chat_id=chat_id,
@@ -324,23 +274,14 @@ async def finalize_album_action(update: Update, context: ContextTypes.DEFAULT_TY
 
     await execute_album_creation(update, context)
 
-    # مسح البيانات المؤقتة الخاصة بالعملية الحالية
     context.user_data.pop("current_album_caption", None)
     
-    # حذف رسالة التقدم بعد الانتهاء
     progress_msg_id = context.user_data.pop("progress_message_id", None)
     if progress_msg_id:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=progress_msg_id)
         except Exception:
-            pass # Ignore if it fails (already deleted, etc.)
-
-    # لا يتم إرسال أي رسالة هنا
-    
-    # إعادة عرض لوحة المفاتيح الرئيسية بصمت
-    # قد يكون ضروريا إذا تم إزالتها (مثل بعد إدخال التعليق اليدوي)
-    # لا توجد طريقة لإعادة لوحة المفاتيح بدون رسالة، لذلك سنتركها
-    # يمكن للمستخدم ببساطة إرسال صورة أخرى أو أمر للتعامل مع البوت
+            pass
     
     return ConversationHandler.END
 
@@ -352,7 +293,7 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
     media_queue = context.user_data.get("media_queue", [])
     total_media = len(media_queue)
     user_chat_id = update.effective_chat.id
-    target_chat_id = context.user_data["album_destination_chat_id"]
+    target_chat_id = context.user_data["album_destination_chat_id"] # سيتم تعيينها دائمًا
     album_caption = context.user_data.get("current_album_caption", "")
     
     split_mode = context.user_data.get("album_split_mode", "equal")
@@ -381,7 +322,6 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
             MediaClass = InputMediaPhoto if item["type"] == "photo" else InputMediaVideo
             input_media.append(MediaClass(media=item["media"], caption=caption))
         
-        # Backoff logic
         for attempt in range(5):
             try:
                 await context.bot.send_media_group(chat_id=target_chat_id, media=input_media)
@@ -393,7 +333,6 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
                 logger.error(f"Failed to send chunk {index+1}: {e}")
                 break
         
-        # Update progress
         progress_msg_id = context.user_data.get("progress_message_id")
         if progress_msg_id and total_albums > 1:
             try:
@@ -406,10 +345,10 @@ async def execute_album_creation(update: Update, context: ContextTypes.DEFAULT_T
         if index < total_albums - 1:
             await asyncio.sleep(get_random_delay())
 
-    context.user_data["media_queue"] = [] # Clear queue after sending
+    context.user_data["media_queue"] = []
 
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await initialize_user_data(context)
+    await initialize_user_data(context, update.effective_chat.id)
     context.user_data["media_queue"] = []
     context.user_data.pop("current_album_caption", None)
     await update.message.reply_text(MESSAGES["queue_cleared"], reply_markup=get_main_reply_markup())
@@ -427,12 +366,10 @@ async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text, markup = (MESSAGES["cancel_operation"], get_main_reply_markup())
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
     
-    # فقط مسح البيانات المؤقتة، وليس الإعدادات الدائمة
     context.user_data.pop("current_album_caption", None)
     
     return ConversationHandler.END
 
-# اختصارات للوضوح
 cancel_album_creation = cancel_operation
 cancel_operation_general = cancel_operation
 
@@ -445,14 +382,10 @@ def main() -> None:
     
     application = Application.builder().token(token).build()
 
-    # محادثة لتغيير وجهة الألبوم
-    dest_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_destination'])}$"), prompt_for_destination_setting)],
-        states={SETTING_GLOBAL_DESTINATION: [CallbackQueryHandler(handle_global_destination_choice, pattern=f"^{SEND_LOC_CB_PREFIX}.*|^{CANCEL_CB_DATA}$")]},
-        fallbacks=[CommandHandler("cancel", cancel_operation_general)]
-    )
+    # تم حذف محادثة تغيير وجهة الألبوم
+    # dest_conv
 
-    # محادثة جديدة لتغيير نمط التقسيم
+    # محادثة لتغيير نمط التقسيم
     split_mode_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & filters.Regex(f"^{re.escape(MESSAGES['keyboard_change_split_mode'])}$"), prompt_for_split_mode_setting)],
         states={CHANGING_SPLIT_MODE: [CallbackQueryHandler(handle_split_mode_choice, pattern=f"^{SPLIT_SET_CB_PREFIX}.*|^{CANCEL_CB_DATA}$")]},
@@ -472,8 +405,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     
-    # إضافة المعالجات
-    application.add_handler(dest_conv)
+    # إضافة المعالجات المتبقية
     application.add_handler(split_mode_conv)
     application.add_handler(album_creation_conv)
     
