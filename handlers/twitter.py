@@ -13,7 +13,7 @@ import messages as bm
 from config import OUTPUT_DIR
 import keyboards as kb
 from main import bot, db, send_analytics
-from log.logger import logger as logging
+import logger as logging
 
 MAX_FILE_SIZE = 500 * 1024 * 1024
 
