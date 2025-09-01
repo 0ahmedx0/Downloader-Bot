@@ -8,7 +8,7 @@ from aiogram import types, Router, F
 from aiogram.types import FSInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
 from aiogram.exceptions import TelegramAPIError
-from aiogram.utils.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
