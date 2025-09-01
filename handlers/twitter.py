@@ -93,6 +93,7 @@ async def send_large_file_pyro(chat_id: int, file_path: str, caption: str | None
 # ==============================================================================
 #                            منطق المعالجة الأساسي
 # ==============================================================================
+# ... (احتفظ بكل الكود الآخر كما هو) ...
 
 async def process_single_tweet(message: types.Message, tweet_id: str, bot_url: str, business_id: str | None):
     """
@@ -107,8 +108,19 @@ async def process_single_tweet(message: types.Message, tweet_id: str, bot_url: s
         await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name="twitter")
         tweet_media = scrape_media(tweet_id)
         
+        # ✅ التحقق من أن tweet_media ليست None
+        if not tweet_media:
+            raise Exception("API did not return any media data.")
+
         post_caption = tweet_media.get("text", "")
+        
+        # --- [الإصلاح هنا] ---
         user_captions = await db.get_user_captions(message.from_user.id)
+        # إذا لم يكن للمستخدم كابشن مخصص، استخدم قاموسًا فارغًا كقيمة افتراضية
+        if user_captions is None:
+            user_captions = {} 
+        # --- [نهاية الإصلاح] ---
+            
         final_caption = bm.captions(user_captions, post_caption, bot_url)
 
         images_to_send = []
@@ -157,11 +169,14 @@ async def process_single_tweet(message: types.Message, tweet_id: str, bot_url: s
 
     except Exception as e:
         print(f"Error processing tweet {tweet_id}: {e}")
-        await message.reply(f"حدث خطأ أثناء معالجة التغريدة:\n`{tweet_id}`\nالسبب: {e}")
+        # هنا يتم إرسال رسالة الخطأ للمستخدم
+        await message.reply(f"حدث خطأ أثناء معالجة التغريدة:\n`{tweet_id}`\nالسبب: `{e}`")
     finally:
         # 4. التنظيف: حذف المجلد المؤقت وملفاته بعد الانتهاء
         if os.path.exists(tweet_dir):
             shutil.rmtree(tweet_dir)
+
+# ... (احتفظ بباقي الدوال كما هي) ...
 
 
 async def process_chat_queue(chat_id: int):
