@@ -16,7 +16,7 @@ from main import bot, db, send_analytics
 
 # ✅ إعدادات Pyrogram من المتغيرات البيئية (string session)
 PYROGRAM_API_ID = int(os.environ.get('ID'))
-PYROGRAM_API_HASH = os.environ.get('HASH'))
+PYROGRAM_API_HASH = os.environ.get('HASH')
 PYROGRAM_SESSION_STRING = os.environ.get('PYRO_SESSION_STRING')  # يجب أن تكون string session
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # حد تليجرام للملف داخل البوت
