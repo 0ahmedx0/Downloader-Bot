@@ -64,7 +64,8 @@ def scrape_media(tweet_id):
     try:
         return r.json()
     except requests.exceptions.JSONDecodeError:
-        if match = re.search(r'<meta content="(.*?)" property="og:description" />', r.text):
+        # ✅ استخدم الـ walrus operator لإسناد نتيجة البحث داخل الشرط
+        if (match := re.search(r'<meta content="(.*?)" property="og:description" />', r.text)):
             raise Exception(f'API returned error: {html.unescape(match.group(1))}')
         raise
 
