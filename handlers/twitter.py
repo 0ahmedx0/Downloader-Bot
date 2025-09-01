@@ -26,8 +26,6 @@ import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 
 from main import bot, db, send_analytics
-Pyrogram من المتغيرات البيئية (string session)
-
 PYROGRAM_API_ID = int(os.environ.get('ID'))
 
 PYROGRAM_API_HASH = os.environ.get('HASH')
