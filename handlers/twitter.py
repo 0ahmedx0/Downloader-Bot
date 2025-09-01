@@ -7,7 +7,8 @@ import requests
 from aiogram import types, Router, F
 from aiogram.types import FSInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
-from aiogram.exceptions import TelegramAPIError, FloodWait  # تحديث الاستيراد لـ aiogram 3.x
+from aiogram.exceptions import TelegramAPIError
+from aiogram.utils.exceptions import FloodWait
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter  # تحديث الاستيراد لـ aiogram 3.x
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
