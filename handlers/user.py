@@ -82,7 +82,13 @@ async def back_to_settings(call: types.CallbackQuery):
 
 @router.callback_query(F.data == "settings_caption")
 async def captions_setting(call: types.CallbackQuery):
+    # --- [الإصلاح الأول هنا] ---
     user_captions = await db.get_user_captions(call.from_user.id)
+    # التحقق من أن القيمة ليست None قبل تمريرها
+    if user_captions is None:
+        user_captions = {}  # استخدام قاموس فارغ كقيمة افتراضية آمنة
+    # --- [نهاية الإصلاح] ---
+    
     await call.message.edit_text(
         text=bm.captions_settings(),
         reply_markup=kb.return_captions_keyboard(captions=user_captions), parse_mode='HTML')
@@ -93,78 +99,83 @@ async def captions_setting(call: types.CallbackQuery):
 async def change_captions(call: types.CallbackQuery):
     captions = call.data.split('_')[1]
     await db.update_captions(captions=captions, user_id=call.from_user.id)
-    await call.message.edit_reply_markup(reply_markup=kb.return_captions_keyboard(captions))
+    
+    # --- [تحسين إضافي هنا] ---
+    # نمرر القيمة الجديدة مباشرة بدلًا من الاعتماد على استدعاء آخر لقاعدة البيانات
+    new_captions_config = await db.get_user_captions(call.from_user.id)
+    if new_captions_config is None:
+        new_captions_config = {}
+    # --- [نهاية التحسين] ---
+    
+    await call.message.edit_reply_markup(reply_markup=kb.return_captions_keyboard(new_captions_config))
     await call.answer()
 
 
 def create_and_save_chart(data, period):
+    # ... (هذه الدالة تبقى كما هي بدون تغيير) ...
     filename = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S") + "_chart.png"
 
     if period == 'Week':
-        # Використовуємо лише перші 7 днів
         dates = list(data.keys())[:7]
         counts = list(data.values())[:7]
     elif period == 'Month':
-        dates = list(data.keys())[::3]  # Для місяця беремо кожну 3-ю точку
+        dates = list(data.keys())[::3]
         counts = list(data.values())[::3]
     elif period == 'Year':
-        # Агрегуємо дані за місяцями
         monthly_data = defaultdict(int)
         for date_str, count in data.items():
             date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-            month_key = date.strftime("%Y-%m")  # Формат: "2025-02"
+            month_key = date.strftime("%Y-%m")
             monthly_data[month_key] += count
-        # Беремо останні 12 місяців
         all_months = sorted(set(monthly_data.keys()))
         if len(all_months) > 12:
             all_months = all_months[-12:]
-        # Перетворюємо ключі місяців у datetime-об’єкти (наприклад, 1 число місяця)
         dates = [datetime.datetime.strptime(month, "%Y-%m") for month in all_months]
         counts = [monthly_data[month] for month in all_months]
     else:
-        # За замовчуванням (наприклад, для Week) використовуємо дані без змін
         dates = list(data.keys())
         counts = list(data.values())
 
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5), facecolor='#2E2E2E')
-
     ax.plot(dates, counts, marker='o', color='#4CAF50', markersize=8, linewidth=2, label='Downloads')
     ax.fill_between(dates, counts, color='#4CAF50', alpha=0.3)
-
     ax.set_title('Statistics of Downloaded Videos', fontsize=16, color='#FFFFFF')
     ax.set_xlabel('Date', fontsize=12, color='#B0B0B0')
     ax.set_ylabel('Number of Downloads', fontsize=12, color='#B0B0B0')
 
-    if period == 'Week':
-        ax.xaxis.set_major_locator(MaxNLocator(7))  # Для тижня 7 міток
-    elif period == 'Month':
-        ax.xaxis.set_major_locator(MaxNLocator(8))  # Для місяця 8 міток
-    elif period == 'Year':
-        ax.xaxis.set_major_locator(MaxNLocator(12))  # Для року 12 міток
+    if period == 'Week': ax.xaxis.set_major_locator(MaxNLocator(7))
+    elif period == 'Month': ax.xaxis.set_major_locator(MaxNLocator(8))
+    elif period == 'Year': ax.xaxis.set_major_locator(MaxNLocator(12))
 
     if period == 'Year':
         import matplotlib.dates as mdates
         ax.xaxis.set_major_locator(mdates.MonthLocator())
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-
+    
     ax.grid(True, color='#444444', linestyle='--', linewidth=0.5)
     ax.spines['bottom'].set_color('#FFFFFF')
     ax.spines['left'].set_color('#FFFFFF')
     ax.tick_params(axis='x', colors='#B0B0B0')
     ax.tick_params(axis='y', colors='#B0B0B0')
-
     fig.savefig(filename, bbox_inches='tight', facecolor=fig.get_facecolor())
     plt.close(fig)
-
     return filename
 
 
 @router.message(Command("stats"))
 async def stats_command(message: types.Message):
-    data_today = await db.get_downloaded_files_count('Week')
+    # --- [الإصلاح الثاني هنا] ---
+    data = await db.get_downloaded_files_count('Week')
+    
+    # التحقق من وجود بيانات قبل محاولة رسم المخطط
+    if not data:
+        await message.answer("لا توجد بيانات إحصائية متاحة لهذه الفترة.")
+        return
+    # --- [نهاية الإصلاح] ---
+    
     period = "Week"
-    filename = create_and_save_chart(data_today, period)
+    filename = create_and_save_chart(data, period)
 
     chart_input_file = FSInputFile(filename)
     await message.answer_photo(chart_input_file, caption='Statistics for Week',
@@ -177,9 +188,18 @@ async def stats_command(message: types.Message):
 @router.callback_query(F.data.startswith('date_'))
 async def switch_period(call: types.CallbackQuery):
     await call.message.delete()
-
     period = call.data.split("_")[1]
+
+    # --- [الإصلاح الثالث هنا - نفس مشكلة الإحصائيات] ---
     data = await db.get_downloaded_files_count(period)
+    
+    # التحقق من وجود بيانات قبل محاولة رسم المخطط
+    if not data:
+        await call.message.answer(f"لا توجد بيانات إحصائية متاحة لهذه الفترة: {period}")
+        await call.answer()
+        return
+    # --- [نهاية الإصلاح] ---
+
     filename = create_and_save_chart(data, period)
 
     chart_input_file = FSInputFile(filename)
