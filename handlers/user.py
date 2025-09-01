@@ -1,255 +1,190 @@
-import asyncio
-import html
-import os
-import re
-from urllib.parse import urlsplit
-import requests
+import datetime
+from collections import defaultdict
+
 from aiogram import types, Router, F
+from aiogram.filters import Command
+
+import os
+import matplotlib.pyplot as plt
 from aiogram.types import FSInputFile
-from aiogram.utils.media_group import MediaGroupBuilder
-from aiogram.exceptions import TelegramRetryAfter
-from pyrogram import Client as PyroClient  # ✅ Pyrogram
+from matplotlib.ticker import MaxNLocator
 
+import keyboards as kb
 import messages as bm
-from config import OUTPUT_DIR, CHANNEL_IDtwiter
-from main import bot, db, send_analytics
-
-# ✅ إعدادات Pyrogram من المتغيرات البيئية (string session)
-PYROGRAM_API_ID = int(os.environ.get('ID'))
-PYROGRAM_API_HASH = os.environ.get('HASH')
-PYROGRAM_SESSION_STRING = os.environ.get('PYRO_SESSION_STRING')  # يجب أن تكون string session
-
-MAX_FILE_SIZE = 50 * 1024 * 1024  # حد تليجرام للملف داخل البوت
-ALBUM_IMAGE_LIMIT = 5           # حد الصور في الألبوم (Telegram يسمح حتى 10)
-MAX_PER_BATCH = 25              # حجم الدفعة عند وجود قائمة روابط طويلة
+from main import db, send_analytics, bot
 
 router = Router()
-album_accumulator = {}
-chat_queues = {}
-chat_workers = {}
 
-# -------------------------------
-# أدوات مساعدة
-# -------------------------------
-def chunk_list(seq, size):
-    for i in range(0, len(seq), size):
-        yield seq[i:i+size]
 
-def extract_tweet_ids(text: str):
-    """
-    يستخرج جميع معرفات التغريدات من نص واحد (يدعم twitter/x.com مع لاحقات photo/video
-    كما يحاول فك روابط t.co إن وُجدت).
-    """
-    unshortened_links = ''
-    # فك اختصار t.co أينما وجد
-    for link in re.findall(r't\.co\/[a-zA-Z0-9]+', text, flags=re.IGNORECASE):
-        try:
-            unshortened_link = requests.get('https://' + link, timeout=10).url
-            unshortened_links += '\n' + unshortened_link
-        except Exception:
-            pass
+async def update_info(message: types.Message):
+    user_id = message.from_user.id
+    user_name = message.from_user.full_name
+    user_username = message.from_user.username
+    result = await db.user_exist(user_id)
+    if result:
+        await db.user_update_name(user_id, user_name, user_username)
+    else:
+        await db.add_user(user_id, user_name, user_username, "private", "uk", 'active')
+    await db.set_active(user_id)
 
-    # ابحث عن status/ID حتى لو بعده /photo/1 أو /video/1
-    pattern = re.compile(
-        r'(?:twitter|x)\.com\/.{1,15}\/(?:web|status(?:es)?)\/([0-9]{1,20})',
-        flags=re.IGNORECASE
-    )
-    tweet_ids = pattern.findall(text + unshortened_links)
 
-    # إزالة التكرار مع الحفاظ على الترتيب
-    return list(dict.fromkeys(tweet_ids)) if tweet_ids else None
+@router.message(F.new_chat_member)
+async def send_welcome(message: types.Message):
+    for user in message.new_chat_members:
+        if user.is_bot and user.id == bot.id:
+            chat_info = await bot.get_chat(message.chat.id)
+            chat_type = "public"
+            user_id = message.chat.id
+            user_name = chat_info.title
+            user_username = None
+            language = 'uk'
+            status = 'active'
 
-def scrape_media(tweet_id):
-    r = requests.get(f'https://api.vxtwitter.com/Twitter/status/{tweet_id}')
-    r.raise_for_status()
-    try:
-        return r.json()
-    except requests.exceptions.JSONDecodeError:
-        if match := re.search(r'<meta content="(.*?)" property="og:description" />', r.text):
-            raise Exception(f'API returned error: {html.unescape(match.group(1))}')
-        raise
+            await db.add_user(user_id, user_name, user_username, chat_type, language, status)
 
-async def download_media(media_url, file_path):
-    response = requests.get(media_url, stream=True)
-    response.raise_for_status()
-    with open(file_path, 'wb') as file:
-        for chunk in response.iter_content(chunk_size=8192):
-            file.write(chunk)
+            chat_title = chat_info.title
+            await bot.send_message(
+                chat_id=message.chat.id,
+                text=bm.join_group(chat_title),
+                parse_mode="HTML")
 
-# ✅ إرسال الملفات الكبيرة باستخدام string session مع Pyrogram
-async def send_large_file_pyro(chat_id, file_path, caption=None):
-    async with PyroClient(
-        PYROGRAM_SESSION_STRING,
-        api_id=PYROGRAM_API_ID,
-        api_hash=PYROGRAM_API_HASH,
-        in_memory=True
-    ) as client:
-        await client.send_document(chat_id=chat_id, document=file_path, caption=caption or "")
 
-async def reply_media(message, tweet_id, tweet_media, bot_url, business_id):
-    await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name="twitter")
-    tweet_dir = f"{OUTPUT_DIR}/{tweet_id}"
-    post_caption = tweet_media.get("text") or ""
-    user_captions = await db.get_user_captions(message.from_user.id)
+@router.message(Command("start"))
+async def send_welcome(message: types.Message):
+    await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name='start')
 
-    if not os.path.exists(tweet_dir):
-        os.makedirs(tweet_dir, exist_ok=True)
+    await message.reply(bm.welcome_message())
+    await update_info(message)
 
-    key = message.chat.id
-    if key not in album_accumulator:
-        album_accumulator[key] = {"image": [], "video": []}
 
-    try:
-        for media in tweet_media.get('media_extended', []):
-            media_url = media['url']
-            media_type = media['type']
-            file_name = os.path.join(tweet_dir, os.path.basename(urlsplit(media_url).path))
-            await download_media(media_url, file_name)
+@router.message(Command("remove_keyboard"))
+async def remove_reply_keyboard(message: types.Message):
+    await message.reply(text=bm.keyboard_removed(), reply_markup=types.ReplyKeyboardRemove())
 
-            if media_type == 'image':
-                album_accumulator[key]["image"].append((file_name, media_type, tweet_dir))
-            elif media_type in ['video', 'gif']:
-                album_accumulator[key]["video"].append((file_name, media_type, tweet_dir))
 
-        # ✅ الصور (أرسل حتى 10 صور كألبوم)
-        if len(album_accumulator[key]["image"]) >= ALBUM_IMAGE_LIMIT:
-            album_to_send = album_accumulator[key]["image"][:ALBUM_IMAGE_LIMIT]
-            media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
-            for file_path, _, _ in album_to_send:
-                media_group.add_photo(media=FSInputFile(file_path))
-            while True:
-                try:
-                    await message.answer_media_group(media_group.build())
-                    break
-                except TelegramRetryAfter as e:
-                    await asyncio.sleep(e.retry_after)
-            # إزالة المُرسَل وتنظيف
-            album_accumulator[key]["image"] = album_accumulator[key]["image"][ALBUM_IMAGE_LIMIT:]
-            for file_path, _, dir_path in album_to_send:
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-                if os.path.exists(dir_path) and not os.listdir(dir_path):
-                    os.rmdir(dir_path)
-            await asyncio.sleep(5)
+@router.message(Command("settings"))
+async def settings(message: types.Message):
+    await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name='settings')
 
-        # ✅ الفيديوهات
-        if len(album_accumulator[key]["video"]) >= 1:
-            for file_path, _, dir_path in album_accumulator[key]["video"]:
-                if os.path.getsize(file_path) > MAX_FILE_SIZE:
-                    try:
-                        await send_large_file_pyro(CHANNEL_IDtwiter, file_path, caption="📤 تم رفع فيديو كبير ✅")
-                        if business_id is None:
-                            await message.answer(f"✅ تم إرسال فيديو كبير باستخدام Pyrogram: `{os.path.basename(file_path)}`")
-                    except Exception as e:
-                        print(f"[Pyrogram Error] {e}")
-                        if business_id is None:
-                            await message.answer("❌ حصل خطأ أثناء إرسال الملف الكبير.")
-                else:
-                    try:
-                        await message.answer_video(FSInputFile(file_path))
-                    except Exception as e:
-                        print(f"Error sending video: {e}")
-                        if business_id is None:
-                            await message.answer("❌ حصل خطأ أثناء إرسال الفيديو.")
+    await message.reply(
+        text=bm.settings(),
+        reply_markup=kb.return_settings_keyboard(),
+        parse_mode="HTML")
 
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-                if os.path.exists(dir_path) and not os.listdir(dir_path):
-                    os.rmdir(dir_path)
 
-            album_accumulator[key]["video"] = []
-            await asyncio.sleep(5)
+@router.callback_query(F.data == 'back_to_settings')
+async def back_to_settings(call: types.CallbackQuery):
+    await call.message.edit_text(
+        text=bm.settings(),
+        reply_markup=kb.return_settings_keyboard())
+    await call.answer()
 
-    except Exception as e:
-        print(e)
-        if business_id is None:
-            react = types.ReactionTypeEmoji(emoji="👎")
-            await message.react([react])
-        if business_id is None:
-            await message.reply("حدث خطأ أثناء معالجة الوسائط ☹️")
 
-# -------------------------------
-# عامل معالجة كل محادثة (مع دفعات ورسائل تقدم)
-# -------------------------------
-async def process_chat_queue(chat_id):
-    while True:
-        message = await chat_queues[chat_id].get()
-        try:
-            await asyncio.sleep(1)
-            business_id = getattr(message, "business_connection_id", None)
-            if business_id is None:
-                await message.react([types.ReactionTypeEmoji(emoji="👨‍💻")])
+@router.callback_query(F.data == "settings_caption")
+async def captions_setting(call: types.CallbackQuery):
+    user_captions = await db.get_user_captions(call.from_user.id)
+    await call.message.edit_text(
+        text=bm.captions_settings(),
+        reply_markup=kb.return_captions_keyboard(captions=user_captions), parse_mode='HTML')
+    await call.answer()
 
-            bot_url = f"t.me/{(await bot.get_me()).username}"
-            tweet_ids = extract_tweet_ids(message.text or "")
 
-            if tweet_ids:
-                batches = list(chunk_list(tweet_ids, MAX_PER_BATCH))
-                total = len(tweet_ids)
-                done = 0
-                progress_msg = None
+@router.callback_query(F.data.startswith('captions_'))
+async def change_captions(call: types.CallbackQuery):
+    captions = call.data.split('_')[1]
+    await db.update_captions(captions=captions, user_id=call.from_user.id)
+    await call.message.edit_reply_markup(reply_markup=kb.return_captions_keyboard(captions))
+    await call.answer()
 
-                if business_id is None:
-                    progress_msg = await message.answer(f"📥 تم استقبال {total} رابط. المعالجة على دفعات ({len(batches)}).")
 
-                # لفت الانتباه بأن هناك معالجة جارية
-                if business_id is None:
-                    try:
-                        await bot.send_chat_action(message.chat.id, "typing")
-                    except Exception:
-                        pass
+def create_and_save_chart(data, period):
+    filename = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S") + "_chart.png"
 
-                for bi, batch in enumerate(batches, start=1):
-                    for tweet_id in batch:
-                        try:
-                            media = scrape_media(tweet_id)
-                            await reply_media(message, tweet_id, media, bot_url, business_id)
-                        except Exception as e:
-                            print(f"[scrape/reply error] {tweet_id}: {e}")
-                            if business_id is None:
-                                await message.answer(f"⚠️ لم أستطع معالجة الرابط: {tweet_id}")
-                        done += 1
-                        await asyncio.sleep(3)
+    if period == 'Week':
+        # Використовуємо лише перші 7 днів
+        dates = list(data.keys())[:7]
+        counts = list(data.values())[:7]
+    elif period == 'Month':
+        dates = list(data.keys())[::3]  # Для місяця беремо кожну 3-ю точку
+        counts = list(data.values())[::3]
+    elif period == 'Year':
+        # Агрегуємо дані за місяцями
+        monthly_data = defaultdict(int)
+        for date_str, count in data.items():
+            date = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            month_key = date.strftime("%Y-%m")  # Формат: "2025-02"
+            monthly_data[month_key] += count
+        # Беремо останні 12 місяців
+        all_months = sorted(set(monthly_data.keys()))
+        if len(all_months) > 12:
+            all_months = all_months[-12:]
+        # Перетворюємо ключі місяців у datetime-об’єкти (наприклад, 1 число місяця)
+        dates = [datetime.datetime.strptime(month, "%Y-%m") for month in all_months]
+        counts = [monthly_data[month] for month in all_months]
+    else:
+        # За замовчуванням (наприклад, для Week) використовуємо дані без змін
+        dates = list(data.keys())
+        counts = list(data.values())
 
-                    if progress_msg:
-                        try:
-                            await progress_msg.edit_text(f"⌛ دفعة {bi}/{len(batches)} — التقدم: {done}/{total}")
-                        except Exception:
-                            pass
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor='#2E2E2E')
 
-                if progress_msg:
-                    try:
-                        await progress_msg.edit_text(f"✅ اكتملت المعالجة: {done}/{total}")
-                    except Exception:
-                        pass
+    ax.plot(dates, counts, marker='o', color='#4CAF50', markersize=8, linewidth=2, label='Downloads')
+    ax.fill_between(dates, counts, color='#4CAF50', alpha=0.3)
 
-                await asyncio.sleep(2)
-                try:
-                    await message.delete()
-                except Exception as delete_error:
-                    print(f"Error deleting message: {delete_error}")
+    ax.set_title('Statistics of Downloaded Videos', fontsize=16, color='#FFFFFF')
+    ax.set_xlabel('Date', fontsize=12, color='#B0B0B0')
+    ax.set_ylabel('Number of Downloads', fontsize=12, color='#B0B0B0')
 
-            else:
-                if business_id is None:
-                    await message.react([types.ReactionTypeEmoji(emoji="👎")])
-                    await message.answer("لم يتم العثور على تغريدات في الرسالة.")
-        finally:
-            chat_queues[chat_id].task_done()
+    if period == 'Week':
+        ax.xaxis.set_major_locator(MaxNLocator(7))  # Для тижня 7 міток
+    elif period == 'Month':
+        ax.xaxis.set_major_locator(MaxNLocator(8))  # Для місяця 8 міток
+    elif period == 'Year':
+        ax.xaxis.set_major_locator(MaxNLocator(12))  # Для року 12 міток
 
-# -------------------------------
-# نقاط الدخول: رسالة واحدة قد تحتوي عدة روابط
-# -------------------------------
-LINKS_REGEX = r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"
+    if period == 'Year':
+        import matplotlib.dates as mdates
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
 
-@router.message(F.text.regexp(LINKS_REGEX))
-@router.business_message(F.text.regexp(LINKS_REGEX))
-async def handle_tweet_links(message):
-    chat_id = message.chat.id
-    if chat_id not in chat_queues:
-        chat_queues[chat_id] = asyncio.Queue()
-        chat_workers[chat_id] = asyncio.create_task(process_chat_queue(chat_id))
-    await chat_queues[chat_id].put(message)
+    ax.grid(True, color='#444444', linestyle='--', linewidth=0.5)
+    ax.spines['bottom'].set_color('#FFFFFF')
+    ax.spines['left'].set_color('#FFFFFF')
+    ax.tick_params(axis='x', colors='#B0B0B0')
+    ax.tick_params(axis='y', colors='#B0B0B0')
+
+    fig.savefig(filename, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+    return filename
+
+
+@router.message(Command("stats"))
+async def stats_command(message: types.Message):
+    data_today = await db.get_downloaded_files_count('Week')
+    period = "Week"
+    filename = create_and_save_chart(data_today, period)
+
+    chart_input_file = FSInputFile(filename)
+    await message.answer_photo(chart_input_file, caption='Statistics for Week',
+                               reply_markup=kb.stats_keyboard())
+
+    if os.path.exists(filename):
+        os.remove(filename)
+
+
+@router.callback_query(F.data.startswith('date_'))
+async def switch_period(call: types.CallbackQuery):
+    await call.message.delete()
+
+    period = call.data.split("_")[1]
+    data = await db.get_downloaded_files_count(period)
+    filename = create_and_save_chart(data, period)
+
+    chart_input_file = FSInputFile(filename)
+    await call.message.answer_photo(chart_input_file, caption=f'Statistics for {period}',
+                                    reply_markup=kb.stats_keyboard())
+
+    if os.path.exists(filename):
+        os.remove(filename)
