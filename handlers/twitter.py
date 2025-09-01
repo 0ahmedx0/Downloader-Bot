@@ -26,8 +26,7 @@ import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 
 from main import bot, db, send_analytics
-
-✅ إعدادات Pyrogram من المتغيرات البيئية (string session)
+Pyrogram من المتغيرات البيئية (string session)
 
 PYROGRAM_API_ID = int(os.environ.get('ID'))
 
@@ -95,7 +94,6 @@ with open(file_path, 'wb') as file:
 
         file.write(chunk)
 
-✅ إرسال الملفات الكبيرة باستخدام string session مع Pyrogram
 
 async def send_large_file_pyro(chat_id, file_path, caption=None):
 
