@@ -4,6 +4,9 @@ import asyncio
 import html
 import os
 import re
+import shutil
+import uuid
+import pathlib
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -31,6 +34,11 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # حد تليجرام للملف داخل ال
 HTTP_TIMEOUT = ClientTimeout(total=45)  # مهلة طلبات HTTP
 MAX_CONCURRENT_DOWNLOADS = 4  # أقصى تنزيلات متوازية لكل محادثة
 
+# أدوات yt-dlp/ffmpeg (اختياري للكوكيز للتغريدات المحمية)
+YTDLP_BIN = shutil.which("yt-dlp") or "yt-dlp"
+FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
+X_COOKIES = os.environ.get("X_COOKIES")  # اختياري: مسار cookies.txt إذا احتجت
+
 router = Router()
 album_accumulator: dict[int, dict[str, list]] = {}
 chat_queues: dict[int, asyncio.Queue] = {}
@@ -38,11 +46,17 @@ chat_workers: dict[int, asyncio.Task] = {}
 chat_semaphores: dict[int, asyncio.Semaphore] = {}
 
 
+# =========================
+# جلسات HTTP (aiohttp)
+# =========================
 def _get_session() -> aiohttp.ClientSession:
     """إنشاء جلسة aiohttp (تُستخدم مع: async with _get_session() as session)."""
     return aiohttp.ClientSession(timeout=HTTP_TIMEOUT, raise_for_status=True)
 
 
+# =========================
+# فك اختصار t.co واستخراج Tweet IDs
+# =========================
 async def _unshorten_link(session: aiohttp.ClientSession, short_url: str) -> str | None:
     """فك اختصار t.co"""
     try:
@@ -72,6 +86,9 @@ async def extract_tweet_ids(text: str) -> list[str] | None:
     return list(dict.fromkeys(tweet_ids)) if tweet_ids else None
 
 
+# =========================
+# استدعاء vxtwitter (للصور/الفيديو كـ fallback)
+# =========================
 async def scrape_media(tweet_id: str) -> dict:
     """جلب بيانات الوسائط عبر vxtwitter API"""
     url = f'https://api.vxtwitter.com/Twitter/status/{tweet_id}'
@@ -94,7 +111,7 @@ async def scrape_media(tweet_id: str) -> dict:
 
 
 async def download_media(session: aiohttp.ClientSession, media_url: str, file_path: str):
-    """تنزيل غير متزامن لملف وسائط"""
+    """تنزيل غير متزامن لملف وسائط (صور/فيديو)"""
     async with session.get(media_url) as response:
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, 'wb') as f:
@@ -103,7 +120,85 @@ async def download_media(session: aiohttp.ClientSession, media_url: str, file_pa
                     f.write(chunk)
 
 
-# ✅ إرسال الملفات الكبيرة باستخدام string session مع Pyrogram
+# =========================
+# yt-dlp: تنزيل فيديوهات X (أولوية أولى)
+# =========================
+def _ensure_tools_available():
+    if not shutil.which(YTDLP_BIN):
+        raise RuntimeError("yt-dlp غير مثبت أو غير موجود بالمسار.")
+    if not shutil.which(FFMPEG_BIN):
+        raise RuntimeError("ffmpeg غير مثبت أو غير موجود بالمسار.")
+
+
+def _tweet_url_from_id(tweet_id: str) -> str:
+    # رابط متوافق مع yt-dlp
+    return f"https://x.com/i/status/{tweet_id}"
+
+
+async def ytdlp_download_tweet_video(tweet_id: str, out_dir: str) -> str | None:
+    """
+    يحاول تنزيل فيديو تغريدة عبر yt-dlp ويخرج MP4 جاهز للتلغرام.
+    يعيد مسار الملف على النجاح، أو None إن لم يجد فيديو/فشل.
+    """
+    _ensure_tools_available()
+    os.makedirs(out_dir, exist_ok=True)
+
+    base = f"x_{tweet_id}_{uuid.uuid4().hex}"
+    out_tpl = str(pathlib.Path(out_dir) / f"{base}.%(ext)s")
+    url = _tweet_url_from_id(tweet_id)
+
+    # تنسيق: جرّب أفضل فيديو+صوت، وإجبار دمج mp4
+    fmt = "bv*+ba/best"
+
+    cmd = [
+        YTDLP_BIN,
+        "-f", fmt,
+        "--merge-output-format", "mp4",
+        "--ffmpeg-location", FFMPEG_BIN,
+        "-o", out_tpl,
+        "--no-playlist",
+        "--no-warnings",
+        "--restrict-filenames",
+        "--geo-bypass",
+        "--retries", "3",
+        "--fragment-retries", "3",
+        "--concurrent-fragments", "8",
+        url,
+    ]
+
+    # دعم كوكيز لو متاحة (للتغريدات المحمية/المقيدة)
+    if X_COOKIES and os.path.isfile(X_COOKIES):
+        cmd.extend(["--cookies", X_COOKIES])
+
+    # نفّذ yt-dlp كعملية فرعية async
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        # فشل (قد لا تكون التغريدة فيديو/أو محمية بدون كوكيز)
+        print(f"[yt-dlp] failed for {tweet_id}: {stderr.decode(errors='ignore')[:400]}")
+        return None
+
+    # ابحث عن المخرجات .mp4 في out_dir
+    for p in pathlib.Path(out_dir).glob(f"{base}.*"):
+        if p.suffix.lower() == ".mp4":
+            return str(p)
+
+    # اختيار أكبر ملف إن لم نجد mp4 صريح
+    candidates = list(pathlib.Path(out_dir).glob(f"{base}.*"))
+    if candidates:
+        best = max(candidates, key=lambda x: x.stat().st_size)
+        return str(best)
+
+    return None
+
+
+# =========================
+# إرسال عبر Pyrogram عند تجاوز الحجم
+# =========================
 async def send_large_file_pyro(chat_id: int | str, file_path: str, caption: str | None = None):
     async with PyroClient(
         PYROGRAM_SESSION_STRING,
@@ -114,6 +209,9 @@ async def send_large_file_pyro(chat_id: int | str, file_path: str, caption: str 
         await client.send_document(chat_id=chat_id, document=file_path, caption=caption or "")
 
 
+# =========================
+# الرد بالوسائط (صور/فيديو) — منطقك الأصلي مع تحسينات Async
+# =========================
 async def reply_media(
     message: types.Message,
     tweet_id: str,
@@ -181,7 +279,7 @@ async def reply_media(
                         os.rmdir(dir_path)
                 await asyncio.sleep(0)
 
-            # ✅ الفيديوهات
+            # ✅ الفيديوهات (نفس منطقك: لو > 50MB أرسل للقناة)
             if len(album_accumulator[key]["video"]) >= 1:
                 to_send = album_accumulator[key]["video"]
                 album_accumulator[key]["video"] = []
@@ -219,6 +317,9 @@ async def reply_media(
             await message.reply("حدث خطأ أثناء معالجة الوسائط ☹️")
 
 
+# =========================
+# طابور التسلسل لكل محادثة
+# =========================
 async def process_chat_queue(chat_id: int):
     """طابور لمعالجة رسائل كل محادثة بالتسلسل (يتجنب التداخل والريت ليمت)"""
     while True:
@@ -240,9 +341,46 @@ async def process_chat_queue(chat_id: int):
                 if business_id is None:
                     await bot.send_chat_action(message.chat.id, "typing")
 
-                # نعالج التغريدات واحدة تلو الأخرى (أكثر أمانًا على الريت ليمت)
+                # نعالج التغريدات واحدة تلو الأخرى (أأمن على الريت ليمت)
                 for tweet_id in tweet_ids:
-                    media = await scrape_media(tweet_id)
+                    # 1) جرّب yt-dlp أولًا للفيديوهات (أولوية أولى)
+                    downloaded_via_ytdlp = None
+                    try:
+                        downloaded_via_ytdlp = await ytdlp_download_tweet_video(tweet_id, f"{OUTPUT_DIR}/{tweet_id}")
+                    except Exception as e:
+                        print(f"yt-dlp exception: {e}")
+
+                    if downloaded_via_ytdlp:
+                        # أرسل الفيديو مباشرة بنفس منطق الحجم (القناة عند تجاوز 50MB)
+                        try:
+                            if os.path.getsize(downloaded_via_ytdlp) > MAX_FILE_SIZE:
+                                await send_large_file_pyro(CHANNEL_IDtwiter, downloaded_via_ytdlp, caption="📤 تم تنزيل فيديو X عبر yt-dlp")
+                                await message.answer(f"✅ تم إرسال فيديو كبير عبر Pyrogram: `{os.path.basename(downloaded_via_ytdlp)}`")
+                            else:
+                                await message.answer_video(FSInputFile(downloaded_via_ytdlp), caption="✅ تم تنزيل فيديو X عبر yt-dlp")
+                        except Exception as send_err:
+                            print(f"Send video error: {send_err}")
+                            await message.answer("❌ خطأ أثناء إرسال الفيديو الذي تم تنزيله.")
+                        finally:
+                            try:
+                                os.remove(downloaded_via_ytdlp)
+                            except Exception:
+                                pass
+
+                        # انتقل للتغريدة التالية (لا نحتاج scrape_media هنا)
+                        await asyncio.sleep(0)
+                        continue
+
+                    # 2) لو فشل yt-dlp أو التغريدة ليست فيديو، نرجع لطريقتك الحالية (vxtwitter)
+                    try:
+                        media = await scrape_media(tweet_id)
+                    except Exception as sm_err:
+                        print(f"scrape_media error: {sm_err}")
+                        # لو حتى vxtwitter فشل، نكمل للتالية
+                        await message.answer("❌ لم أتمكن من جلب الوسائط لهذه التغريدة.")
+                        await asyncio.sleep(0)
+                        continue
+
                     await reply_media(message, tweet_id, media, bot_url, business_id)
                     await asyncio.sleep(0)
 
@@ -263,6 +401,9 @@ async def process_chat_queue(chat_id: int):
             chat_queues[chat_id].task_done()
 
 
+# =========================
+# Handlers للرسائل التي تحتوي روابط X/Twitter
+# =========================
 @router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
 @router.business_message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
 async def handle_tweet_links(message: types.Message):
