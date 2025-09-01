@@ -21,7 +21,7 @@ PYROGRAM_SESSION_STRING = os.environ.get('PYRO_SESSION_STRING')  # يجب أن �
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # حد تليجرام للملف داخل البوت
 ALBUM_IMAGE_LIMIT = 5           # حد الصور في الألبوم (Telegram يسمح حتى 10)
-MAX_PER_BATCH = 100              # حجم الدفعة عند وجود قائمة روابط طويلة
+MAX_PER_BATCH = 25              # حجم الدفعة عند وجود قائمة روابط طويلة
 
 router = Router()
 album_accumulator = {}
