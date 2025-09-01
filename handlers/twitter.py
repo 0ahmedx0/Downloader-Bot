@@ -1,4 +1,4 @@
-كيف يستقبل الكود رسايل المستخدم
+
 import asyncio
 
 import html
