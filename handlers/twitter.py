@@ -1,228 +1,263 @@
-# -*- coding: utf-8 -*-
-
-# ==============================================================================
-#                      الكود الكامل والجاهز للنسخ واللصق
-# ==============================================================================
-
 import asyncio
 import html
 import os
 import re
-import shutil  # مهم لحذف المجلدات وملفاتها بأمان
 from urllib.parse import urlsplit
 
-import requests
+import aiohttp
+from aiohttp import ClientTimeout
+
 from aiogram import types, Router, F
-from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import FSInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
-from pyrogram import Client as PyroClient
+from aiogram.exceptions import TelegramRetryAfter
 
-# --- تأكد من أن هذه الملفات والمتغيرات موجودة في مشروعك ---
+from pyrogram import Client as PyroClient  # ✅ Pyrogram
+
 import messages as bm
 from config import OUTPUT_DIR, CHANNEL_IDtwiter
 from main import bot, db, send_analytics
-# ---------------------------------------------------------
 
-# --- إعدادات Pyrogram والمتغيرات العامة ---
+# ✅ إعدادات Pyrogram من المتغيرات البيئية (string session)
 PYROGRAM_API_ID = int(os.environ.get('ID'))
-PYROGRAM_API_HASH = os.environ.get('HASH')
-PYROGRAM_SESSION_STRING = os.environ.get('PYRO_SESSION_STRING')
-MAX_FILE_SIZE = 50 * 1024 * 1024  # حد حجم الملف 50 ميجابايت
-TELEGRAM_ALBUM_LIMIT = 10  # الحد الأقصى للوسائط في الألبوم الواحد على تليجرام
+PYROGRAM_API_HASH = os.environ.get('HASH'))
+PYROGRAM_SESSION_STRING = os.environ.get('PYRO_SESSION_STRING')  # يجب أن تكون string session
+
+MAX_FILE_SIZE = 50 * 1024 * 1024  # حد تليجرام للملف داخل البوت
+HTTP_TIMEOUT = ClientTimeout(total=45)  # مهلة طلبات HTTP
+MAX_CONCURRENT_DOWNLOADS = 4  # أقصى تنزيلات متوازية لكل محادثة
 
 router = Router()
+album_accumulator = {}
 chat_queues = {}
-# متغير لإدارة حالة العامل ومنع تشغيل أكثر من عامل لنفس المحادثة
-is_worker_active = {}
+chat_workers = {}
+chat_semaphores = {}  # لكل محادثة semaphore للحد من التوازي
 
 
-# ==============================================================================
-#                            الدوال المساعدة (Helpers)
-# ==============================================================================
+async def _get_session():
+    # جلسة aiohttp مشتركة داخل المهمة الحالية
+    return aiohttp.ClientSession(timeout=HTTP_TIMEOUT, raise_for_status=True)
 
-def extract_tweet_ids(text: str) -> list[str] | None:
-    """
-    يستخرج كل أرقام تعريف التغريدات (Tweet IDs) من نص الرسالة.
-    """
+
+async def _unshorten_link(session: aiohttp.ClientSession, short_url: str) -> str | None:
+    # نفك اختصار t.co عبر طلب GET يسمح بالتحويلات
+    try:
+        async with session.get('https://' + short_url, allow_redirects=True) as resp:
+            return str(resp.url)
+    except Exception:
+        return None
+
+
+async def extract_tweet_ids(text: str) -> list[str] | None:
+    # نفك روابط t.co الموجودة قبل استخراج الـ IDs لزيادة الدقة
     unshortened_links = ''
-    for link in re.findall(r't\.co\/[a-zA-Z0-9]+', text):
-        try:
-            unshortened_link = requests.get('https://' + link, timeout=5).url
-            unshortened_links += '\n' + unshortened_link
-        except requests.RequestException:
-            pass
-    tweet_ids = re.findall(r"(?:twitter|x)\.com/.{1,15}/(?:web|status(?:es)?)/([0-9]{1,20})", text + unshortened_links)
+    tco_links = re.findall(r't\.co/[a-zA-Z0-9]+', text)
+    if tco_links:
+        async with _get_session() as session:
+            tasks = [asyncio.create_task(_unshorten_link(session, link)) for link in tco_links]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for url in results:
+                if isinstance(url, str) and url:
+                    unshortened_links += '\n' + url
+
+    tweet_ids = re.findall(
+        r"(?:twitter|x)\.com/.{1,15}/(?:web|status(?:es)?)/([0-9]{1,20})",
+        text + unshortened_links
+    )
     return list(dict.fromkeys(tweet_ids)) if tweet_ids else None
 
-def scrape_media(tweet_id: str) -> dict | None:
-    """
-    يجلب بيانات الوسائط للتغريدة من API. يعيد None في حال الفشل.
-    """
-    try:
-        r = requests.get(f'https://api.vxtwitter.com/Twitter/status/{tweet_id}')
-        r.raise_for_status()
-        return r.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Request failed for tweet {tweet_id}: {e}")
-        return None
-    except requests.exceptions.JSONDecodeError:
-        print(f"Failed to decode JSON for tweet {tweet_id}")
-        return None
 
-async def download_media(media_url: str, file_path: str):
-    """
-    يحمل ملف وسائط من رابط ويحفظه في المسار المحدد.
-    """
-    response = requests.get(media_url, stream=True, timeout=30)
-    response.raise_for_status()
-    with open(file_path, 'wb') as file:
-        for chunk in response.iter_content(chunk_size=8192):
-            file.write(chunk)
+async def scrape_media(tweet_id: str) -> dict:
+    # استدعاء vxtwitter API بشكل غير متزامن
+    url = f'https://api.vxtwitter.com/Twitter/status/{tweet_id}'
+    async with _get_session() as session:
+        try:
+            async with session.get(url) as resp:
+                # حاول JSON أولًا
+                try:
+                    return await resp.json()
+                except aiohttp.ContentTypeError:
+                    # لو ما قدر يفك JSON، جرّب قراءة النص واستنباط الخطأ من og:description
+                    text = await resp.text()
+                    if match := re.search(
+                        r'<meta content="(.*?)" property="og:description"\s*/?>', text
+                    ):
+                        raise Exception(f'API returned error: {html.unescape(match.group(1))}')
+                    raise
+        except Exception:
+            raise
 
-async def send_large_file_pyro(chat_id: int, file_path: str, caption: str | None = None):
-    """
-    يرسل الملفات الكبيرة باستخدام Pyrogram (String Session).
-    """
-    async with PyroClient(PYROGRAM_SESSION_STRING, api_id=PYROGRAM_API_ID, api_hash=PYROGRAM_API_HASH, in_memory=True) as client:
+
+async def download_media(session: aiohttp.ClientSession, media_url: str, file_path: str):
+    # تنزيل غير متزامن مع chunks
+    async with session.get(media_url) as response:
+        # تأكد من وجود المجلد
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        # اكتب الملف على أقسام
+        with open(file_path, 'wb') as f:
+            async for chunk in response.content.iter_chunked(8192):
+                if chunk:
+                    f.write(chunk)
+
+
+# ✅ إرسال الملفات الكبيرة باستخدام string session مع Pyrogram
+async def send_large_file_pyro(chat_id, file_path, caption=None):
+    async with PyroClient(
+        PYROGRAM_SESSION_STRING,
+        api_id=PYROGRAM_API_ID,
+        api_hash=PYROGRAM_API_HASH,
+        in_memory=True
+    ) as client:
         await client.send_document(chat_id=chat_id, document=file_path, caption=caption or "")
 
 
-# ==============================================================================
-#                            منطق المعالجة الأساسي (النسخة النهائية)
-# ==============================================================================
+async def reply_media(message: types.Message, tweet_id: str, tweet_media: dict, bot_url: str, business_id):
+    await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name="twitter")
+    tweet_dir = f"{OUTPUT_DIR}/{tweet_id}"
+    post_caption = tweet_media.get("text", "")
+    user_captions = await db.get_user_captions(message.from_user.id)
 
-async def process_single_tweet(message: types.Message, tweet_id: str, bot_url: str, business_id: str | None):
-    """
-    دالة معزولة ومكتفية ذاتيًا لمعالجة تغريدة واحدة بالكامل:
-    تحميل -> إرسال -> تنظيف.
-    """
-    tweet_dir = os.path.join(OUTPUT_DIR, tweet_id)
     if not os.path.exists(tweet_dir):
         os.makedirs(tweet_dir)
-    
-    try:
-        await send_analytics(user_id=message.from_user.id, chat_type=message.chat.type, action_name="twitter")
-        
-        # 1. جلب بيانات التغريدة والتحقق منها بقوة
-        tweet_media = scrape_media(tweet_id)
-        if tweet_media is None or not isinstance(tweet_media, dict):
-            print(f"Failed to fetch valid data for tweet {tweet_id}. API returned None or invalid type.")
-            await message.reply(f"لم أتمكن من جلب بيانات التغريدة `{tweet_id}`. قد تكون محذوفة أو الحساب خاص.")
-            return # إيقاف معالجة هذه التغريدة والانتقال للتالية
 
-        post_caption = tweet_media.get("text", "")
-        
-        # 2. التحقق من وجود الكابشن المخصص للمستخدم
-        user_captions = await db.get_user_captions(message.from_user.id)
-        if user_captions is None:
-            user_captions = {} 
-            
-        final_caption = bm.captions(user_captions, post_caption, bot_url)
+    key = message.chat.id
+    if key not in album_accumulator:
+        album_accumulator[key] = {"image": [], "video": []}
 
-        images_to_send = []
-        videos_to_send = []
+    # استخدم نفس الجلسة لتنزيل جميع الوسائط لهذا التغريد
+    async with _get_session() as session:
+        try:
+            media_list = tweet_media.get('media_extended', [])
+            # حد التوازي داخل الرسالة لتفادي ضغط الشبكة/اللوب
+            sem = chat_semaphores.setdefault(key, asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS))
 
-        for media in tweet_media.get('media_extended', []):
-            media_url = media['url']
-            file_name = os.path.basename(urlsplit(media_url).path)
-            file_path = os.path.join(tweet_dir, file_name)
-            await download_media(media_url, file_path)
-            
-            if media['type'] == 'image': images_to_send.append(file_path)
-            elif media['type'] in ['video', 'gif']: videos_to_send.append(file_path)
+            async def _fetch_one(media):
+                async with sem:
+                    media_url = media['url']
+                    media_type = media['type']
+                    file_name = os.path.join(tweet_dir, os.path.basename(urlsplit(media_url).path))
+                    await download_media(session, media_url, file_name)
+                    if media_type == 'image':
+                        album_accumulator[key]["image"].append((file_name, media_type, tweet_dir))
+                    elif media_type in ['video', 'gif']:
+                        album_accumulator[key]["video"].append((file_name, media_type, tweet_dir))
 
-        if not images_to_send and not videos_to_send:
-            await message.reply(f"التغريدة `{tweet_id}` لا تحتوي على صور أو فيديوهات قابلة للتحميل.")
-            return
+            # نزّل الكل (مع الحد الأقصى للتوازي)
+            await asyncio.gather(*[asyncio.create_task(_fetch_one(m)) for m in media_list])
 
-        if images_to_send:
-            for i in range(0, len(images_to_send), TELEGRAM_ALBUM_LIMIT):
-                chunk = images_to_send[i:i + TELEGRAM_ALBUM_LIMIT]
-                media_group = MediaGroupBuilder(caption=final_caption if i == 0 else None)
-                for img_path in chunk: media_group.add_photo(media=FSInputFile(img_path))
+            # ✅ الصور (كل 5 صور ألبوم)
+            if len(album_accumulator[key]["image"]) >= 5:
+                album_to_send = album_accumulator[key]["image"][:5]
+                media_group = MediaGroupBuilder(caption=bm.captions(user_captions, post_caption, bot_url))
+                for file_path, _, _ in album_to_send:
+                    media_group.add_photo(media=FSInputFile(file_path))
+
                 while True:
                     try:
                         await message.answer_media_group(media_group.build())
                         break
-                    except TelegramRetryAfter as e: await asyncio.sleep(e.retry_after)
+                    except TelegramRetryAfter as e:
+                        await asyncio.sleep(e.retry_after)
 
-        for video_path in videos_to_send:
-            video_caption = final_caption if not images_to_send and videos_to_send.index(video_path) == 0 else None
-            try:
-                if os.path.getsize(video_path) > MAX_FILE_SIZE:
-                    await send_large_file_pyro(CHANNEL_IDtwiter, video_path, caption=f"📤 فيديو كبير من تغريدة: {tweet_id}")
-                    await message.answer(f"✅ تم إرسال فيديو بحجم كبير: `{os.path.basename(video_path)}`")
-                else:
-                    await message.answer_video(FSInputFile(video_path), caption=video_caption)
-            except Exception as e:
-                print(f"Error sending video {video_path}: {e}")
-                await message.answer(f"❌ خطأ أثناء إرسال الفيديو: `{os.path.basename(video_path)}`")
-            await asyncio.sleep(1)
+                # نظّف الملفات المرسلة
+                album_accumulator[key]["image"] = album_accumulator[key]["image"][5:]
+                for file_path, _, dir_path in album_to_send:
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+                    if os.path.exists(dir_path) and not os.listdir(dir_path):
+                        os.rmdir(dir_path)
+                await asyncio.sleep(0)  # إتاحة للدورة
 
-    except Exception as e:
-        print(f"An unexpected error occurred while processing tweet {tweet_id}: {e}")
-        await message.reply(f"حدث خطأ غير متوقع أثناء معالجة التغريدة:\n`{tweet_id}`\nالسبب: `{e}`")
-    finally:
-        if os.path.exists(tweet_dir):
-            shutil.rmtree(tweet_dir)
+            # ✅ الفيديوهات (أرسل كل فيديو على حدة)
+            if len(album_accumulator[key]["video"]) >= 1:
+                to_send = album_accumulator[key]["video"]
+                album_accumulator[key]["video"] = []
+                for file_path, _, dir_path in to_send:
+                    if os.path.getsize(file_path) > MAX_FILE_SIZE:
+                        try:
+                            await send_large_file_pyro(CHANNEL_IDtwiter, file_path, caption="📤 تم رفع فيديو كبير ✅")
+                            await message.answer(f"✅ تم إرسال فيديو كبير باستخدام Pyrogram: `{os.path.basename(file_path)}`")
+                        except Exception as e:
+                            print(f"[Pyrogram Error] {e}")
+                            await message.answer("❌ حصل خطأ أثناء إرسال الملف الكبير.")
+                    else:
+                        try:
+                            await message.answer_video(FSInputFile(file_path))
+                        except Exception as e:
+                            print(f"Error sending video: {e}")
+                            await message.answer("❌ حصل خطأ أثناء إرسال الفيديو.")
+                    try:
+                        os.remove(file_path)
+                    except Exception:
+                        pass
+                    if os.path.exists(dir_path) and not os.listdir(dir_path):
+                        os.rmdir(dir_path)
+                await asyncio.sleep(0)
+
+        except Exception as e:
+            print(e)
+            if business_id is None:
+                react = types.ReactionTypeEmoji(emoji="👎")
+                await message.react([react])
+            await message.reply("حدث خطأ أثناء معالجة الوسائط ☹️")
 
 
 async def process_chat_queue(chat_id: int):
-    """
-    العامل (Worker): يعالج كل الرسائل في قائمة الانتظار الخاصة بمحادثة معينة.
-    """
-    is_worker_active[chat_id] = True
-    print(f"Worker started for chat {chat_id}")
-    
-    while not chat_queues[chat_id].empty():
-        message = await chat_queues[chat_id].get()
+    while True:
+        message: types.Message = await chat_queues[chat_id].get()
         try:
-            business_id = message.business_connection_id
+            # صغيرة علشان ما نكتم اللوب
+            await asyncio.sleep(0)
+
+            business_id = getattr(message, "business_connection_id", None)
             if business_id is None:
-                await message.react([types.ReactionTypeEmoji(emoji="👨‍💻")])
-            
+                try:
+                    await message.react([types.ReactionTypeEmoji(emoji="👨‍💻")])
+                except Exception:
+                    pass
+
             bot_url = f"t.me/{(await bot.get_me()).username}"
-            tweet_ids = extract_tweet_ids(message.text)
+
+            # ⚠️ صارت async الآن
+            tweet_ids = await extract_tweet_ids(message.text or "")
 
             if tweet_ids:
                 if business_id is None:
                     await bot.send_chat_action(message.chat.id, "typing")
-                
-                for tweet_id in tweet_ids:
-                    await process_single_tweet(message, tweet_id, bot_url, business_id)
-                    await asyncio.sleep(3)
 
+                # عالج التغريدات واحدة تلو الأخرى (تقدر تخلّيها متوازية لو حبيت، بس التسلسل أأمن للريت ليمت)
+                for tweet_id in tweet_ids:
+                    media = await scrape_media(tweet_id)
+                    await reply_media(message, tweet_id, media, bot_url, business_id)
+                    await asyncio.sleep(0)
+
+                # حاول حذف رسالة الروابط (اختياري)
+                await asyncio.sleep(0.1)
                 try:
                     await message.delete()
                 except Exception as delete_error:
-                    print(f"Could not delete message {message.message_id}: {delete_error}")
-            
-        except Exception as e:
-            print(f"Critical error in processing queue for chat {chat_id}: {e}")
+                    print(f"Error deleting message: {delete_error}")
+
+            else:
+                if business_id is None:
+                    try:
+                        await message.react([types.ReactionTypeEmoji(emoji="👎")])
+                    except Exception:
+                        pass
+                await message.answer("لم يتم العثور على تغريدات.")
         finally:
             chat_queues[chat_id].task_done()
 
-    is_worker_active[chat_id] = False
-    print(f"Worker finished for chat {chat_id}. Queue is empty.")
 
-
-# ==============================================================================
-#                      معالج الرسائل (Message Handler)
-# ==============================================================================
-
-@router.message(F.text.regexp(r"(https?://(www.)?(twitter|x).com/\S+|https?://t.co/\S+)"))
-@router.business_message(F.text.regexp(r"(https?://(www.)?(twitter|x).com/\S+|https?://t.co/\S+)"))
+@router.message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
+@router.business_message(F.text.regexp(r"(https?://(www\.)?(twitter|x)\.com/\S+|https?://t\.co/\S+)"))
 async def handle_tweet_links(message: types.Message):
-    """
-    نقطة الدخول: يستقبل الرسائل ويضعها في قائمة الانتظار.
-    """
     chat_id = message.chat.id
     if chat_id not in chat_queues:
         chat_queues[chat_id] = asyncio.Queue()
-        is_worker_active[chat_id] = False
+        chat_workers[chat_id] = asyncio.create_task(process_chat_queue(chat_id))
+        chat_semaphores[chat_id] = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
     await chat_queues[chat_id].put(message)
-
-    if not is_worker_active.get(chat_id, False):
-        asyncio.create_task(process_chat_queue(chat_id))
