@@ -34,9 +34,9 @@ def extract_tweet_ids(text):
 
 
 def scrape_media(tweet_id):
-    r = requests.get(f'https://api.vxtwitter.com/Twitter/status/{tweet_id}')
-    r.raise_for_status()
     try:
+        r = requests.get(f'https://api.vxtwitter.com/Twitter/status/{tweet_id}')
+        r.raise_for_status()
         return r.json()
     except requests.exceptions.JSONDecodeError:
         if match := re.search(r'<meta content="(.*?)" property="og:description" />', r.text):
@@ -44,10 +44,10 @@ def scrape_media(tweet_id):
             logging.error(f"API returned error: {error_message}")
             raise Exception(f'API returned error: {error_message}')
         logging.error("Failed to parse API response JSON.")
-        raise
+        return None  # Return None on JSON error
     except Exception as e:
         logging.error(f"Failed to fetch media for tweet {tweet_id}: {e}")
-        raise
+        return None # Return None on other errors
 
 
 async def download_media(media_url, file_path):
@@ -164,7 +164,16 @@ async def handle_tweet_links(message):
             for tweet_id in tweet_ids:
                 try:
                     media = scrape_media(tweet_id)
+
+                    # ---===[ التعديل الرئيسي هنا ]===---
+                    # تحقق مما إذا كانت الـ API لم ترجع بيانات أو إذا لم تكن هناك وسائط
+                    if media is None or not media.get('media_extended'):
+                        logging.warning(f"No media found or API returned null for tweet {tweet_id}. Skipping.")
+                        continue  # الأمر continue يعني "انتقل إلى الرابط التالي في القائمة"
+                    # ---===[ نهاية التعديل ]===---
+
                     await reply_media(message, tweet_id, media, bot_url, business_id)
+                    
                 except Exception as e:
                     logging.error(f"Failed to process tweet {tweet_id}: {e}")
                     await message.answer(bm.something_went_wrong())
