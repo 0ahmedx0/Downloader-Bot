@@ -182,7 +182,7 @@ async def handle_album_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def mark_album_ready_after_delay(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
     try:
-        await asyncio.sleep(2.5)  # انتظار وصول بقية عناصر الألبوم
+        await asyncio.sleep(5)  # انتظار وصول بقية عناصر الألبوم
     except asyncio.CancelledError:
         return
 
@@ -196,6 +196,9 @@ async def mark_album_ready_after_delay(update: Update, context: ContextTypes.DEF
         ready_album_ids.append(media_group_id)
         logger.info(f"Album {media_group_id} marked as ready. Ready albums: {ready_album_ids}")
 
+    # إذا لم يكن هناك نافذة اختيار ظاهرة حالياً، اعرضها تلقائياً
+    if not context.user_data.get("processing_started", False) and not context.user_data.get("caption_prompt_shown", False):
+        await start_album_split_process(update, context, is_auto_trigger=True)
 
 # --- بدء عملية التفكيك: اختيار التعليق ---
 async def start_album_split_process(update: Update, context: ContextTypes.DEFAULT_TYPE, is_auto_trigger: bool = False):
