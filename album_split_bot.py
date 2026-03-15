@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 # حالات المحادثة
 ASKING_FOR_MANUAL_CAPTION = 2
-WAITING_FOR_ALBUM = 3
 
 # Callbacks prefixes
 MANUAL_CAPTION_CB_DATA = "cap_manual"
@@ -46,36 +45,35 @@ MESSAGES = {
         "هذا البوت يقوم بعكس وظيفة التجميع: "
         "أرسل لي ألبوم صور أو فيديوهات من تيليجرام، وسأقوم بتفكيكه وإعادة إرساله "
         "على شكل رسائل منفصلة.\n\n"
+        "الآن يمكنك إرسال أكثر من ألبوم، والبوت سيقوم بتفكيكهم كلهم.\n\n"
         "لإظهار الأزرار الرئيسية، استخدم الأمر /keyboard."
     ),
     "help": (
         "طريقة الاستخدام:\n\n"
-        "1) أرسل ألبوماً من تيليجرام (عدة صور أو فيديوهات ضمن نفس الألبوم).\n"
-        "2) بعد اكتمال استلام الألبوم، سيظهر لك اختيار التعليق.\n"
+        "1) أرسل ألبوماً أو عدة ألبومات من تيليجرام.\n"
+        "2) بعد اكتمال استلام الألبومات، سيظهر لك اختيار التعليق.\n"
         "3) يمكنك اختيار تعليق جاهز، أو إدخال تعليق يدوي، أو الإرسال بدون تعليق.\n"
-        "4) سيقوم البوت بإعادة إرسال كل عنصر من الألبوم كرسالة مستقلة.\n\n"
+        "4) سيقوم البوت بإعادة إرسال كل عنصر من جميع الألبومات كرسائل مستقلة.\n\n"
         "ملاحظة: يعمل هذا فقط مع الألبومات، وليس مع صورة واحدة منفصلة.\n\n"
         "هذا العمل تم بواسطة @wjclub.\n\n"
         "لإظهار الأزرار الرئيسية، يمكنك استخدام الأمر /keyboard."
     ),
-    "keyboard_done": "تفكيك الألبوم",
+    "keyboard_done": "تفكيك الألبومات",
     "keyboard_clear": "إعادة تعيين",
     "keyboard_shown": "هذه هي الأزرار الرئيسية:",
     "keyboard_hidden": "تم إخفاء لوحة المفاتيح. لإظهارها مرة أخرى، استخدم الأمر /keyboard.",
-    "album_received_wait": "📥 تم استلام عناصر الألبوم، جاري التحضير...",
-    "no_album_detected": "⚠️ لم يتم العثور على ألبوم صالح بعد. أرسل ألبوماً أولاً.",
-    "album_caption_prompt": "الرجاء اختيار تعليق للعناصر بعد تفكيك الألبوم:",
+    "no_album_detected": "⚠️ لم يتم العثور على ألبومات صالحة بعد. أرسل ألبوماً أولاً.",
+    "album_caption_prompt": "الرجاء اختيار تعليق للعناصر بعد تفكيك جميع الألبومات الجاهزة:",
     "album_caption_manual_prompt": (
         "الرجاء إدخال التعليق الذي تريده للعناصر المفككة.\n\n"
         "إذا كنت لا تريد أي تعليق، فقط أرسل نقطة `.`"
     ),
-    "processing_start": "⏳ جاري تفكيك الألبوم وإعادة إرسال العناصر بشكل منفصل...",
+    "processing_start": "⏳ جاري تفكيك جميع الألبومات وإعادة إرسال العناصر بشكل منفصل...",
     "not_album_item": "⚠️ هذا البوت يعالج الألبومات فقط. أرسل ألبوماً وليس ملفاً منفرداً.",
-    "queue_cleared": "تمت إعادة التعيين وحذف الألبوم المخزن مؤقتاً.",
+    "queue_cleared": "تمت إعادة التعيين وحذف جميع الألبومات المخزنة مؤقتاً.",
     "cancel_operation": "تم إلغاء العملية.",
     "album_comment_option_manual": "إدخال تعليق يدوي ✍️",
-    "done_success": "✅ تم تفكيك الألبوم وإرسال العناصر كرسائل منفصلة.",
-    "waiting_for_more_album_items": "⌛ تم استلام جزء من الألبوم، أنتظر بقية العناصر...",
+    "done_success": "✅ تم تفكيك جميع الألبومات الجاهزة وإرسال العناصر كرسائل منفصلة.",
 }
 
 PREDEFINED_CAPTION_OPTIONS = {
@@ -114,17 +112,22 @@ async def hide_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- تهيئة بيانات المستخدم ---
 async def initialize_user_data(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    if "album_buffer" not in context.user_data:
-        context.user_data["album_buffer"] = {}
-    if "current_album_id" not in context.user_data:
-        context.user_data["current_album_id"] = None
-    if "messages_to_delete" not in context.user_data:
-        context.user_data["messages_to_delete"] = []
-    if "processing_started" not in context.user_data:
-        context.user_data["processing_started"] = False
-    if "processing_tasks" not in context.user_data:
-        context.user_data["processing_tasks"] = {}
-    context.user_data["album_destination_chat_id"] = chat_id
+    user_data = context.user_data
+
+    if "album_buffer" not in user_data:
+        user_data["album_buffer"] = {}  # media_group_id -> items
+    if "messages_to_delete" not in user_data:
+        user_data["messages_to_delete"] = []
+    if "processing_started" not in user_data:
+        user_data["processing_started"] = False
+    if "processing_tasks" not in user_data:
+        user_data["processing_tasks"] = {}  # media_group_id -> task
+    if "ready_album_ids" not in user_data:
+        user_data["ready_album_ids"] = []  # كل الألبومات الجاهزة للتفكيك
+    if "caption_prompt_shown" not in user_data:
+        user_data["caption_prompt_shown"] = False
+
+    user_data["album_destination_chat_id"] = chat_id
 
 
 # --- تجميع الألبوم الوارد ---
@@ -164,38 +167,34 @@ async def handle_album_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     album_buffer[media_group_id].append(item)
-    context.user_data["current_album_id"] = media_group_id
 
     logger.info(f"Added media item to album {media_group_id}. Total: {len(album_buffer[media_group_id])}")
 
-    # إذا كانت هناك مهمة قديمة لهذا الألبوم، ألغها وأعد الجدولة
+    # إعادة جدولة التأكد من اكتمال هذا الألبوم فقط
     old_task = processing_tasks.get(media_group_id)
     if old_task and not old_task.done():
         old_task.cancel()
 
     processing_tasks[media_group_id] = asyncio.create_task(
-        auto_prompt_after_album_complete(update, context, media_group_id)
+        mark_album_ready_after_delay(update, context, media_group_id)
     )
 
 
-async def auto_prompt_after_album_complete(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
+async def mark_album_ready_after_delay(update: Update, context: ContextTypes.DEFAULT_TYPE, media_group_id: str):
     try:
         await asyncio.sleep(2.5)  # انتظار وصول بقية عناصر الألبوم
     except asyncio.CancelledError:
         return
 
-    current_album_id = context.user_data.get("current_album_id")
-    if current_album_id != media_group_id:
-        return
-
     album_items = context.user_data.get("album_buffer", {}).get(media_group_id, [])
+    ready_album_ids = context.user_data.get("ready_album_ids", [])
+
     if len(album_items) < 2:
         return
 
-    if context.user_data.get("processing_started", False):
-        return
-
-    await start_album_split_process(update, context, is_auto_trigger=True)
+    if media_group_id not in ready_album_ids:
+        ready_album_ids.append(media_group_id)
+        logger.info(f"Album {media_group_id} marked as ready. Ready albums: {ready_album_ids}")
 
 
 # --- بدء عملية التفكيك: اختيار التعليق ---
@@ -206,11 +205,9 @@ async def start_album_split_process(update: Update, context: ContextTypes.DEFAUL
     if context.user_data.get("processing_started", False):
         return
 
-    current_album_id = context.user_data.get("current_album_id")
-    album_buffer = context.user_data.get("album_buffer", {})
-    items = album_buffer.get(current_album_id, [])
+    ready_album_ids = context.user_data.get("ready_album_ids", [])
 
-    if not current_album_id or len(items) < 2:
+    if not ready_album_ids:
         if not is_auto_trigger:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -219,7 +216,11 @@ async def start_album_split_process(update: Update, context: ContextTypes.DEFAUL
             )
         return
 
+    if context.user_data.get("caption_prompt_shown", False):
+        return
+
     context.user_data["processing_started"] = True
+    context.user_data["caption_prompt_shown"] = True
 
     keyboard = []
     for key, text in PREDEFINED_CAPTION_OPTIONS.items():
@@ -235,14 +236,7 @@ async def start_album_split_process(update: Update, context: ContextTypes.DEFAUL
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-    dot_msg = await context.bot.send_message(
-        chat_id=chat_id,
-        text=".",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
     context.user_data["messages_to_delete"].append(prompt_msg.message_id)
-    context.user_data["messages_to_delete"].append(dot_msg.message_id)
 
 
 # --- معالجات اختيار التعليق ---
@@ -315,9 +309,10 @@ async def finalize_split_action(update: Update, context: ContextTypes.DEFAULT_TY
         text=MESSAGES["processing_start"],
     )
 
-    await execute_album_split(update, context)
+    await execute_all_ready_albums(update, context)
 
     context.user_data["processing_started"] = False
+    context.user_data["caption_prompt_shown"] = False
     context.user_data.pop("current_caption", None)
 
     try:
@@ -326,53 +321,69 @@ async def finalize_split_action(update: Update, context: ContextTypes.DEFAULT_TY
         logger.warning(f"Failed to delete progress message: {e}")
 
 
-async def execute_album_split(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def execute_all_ready_albums(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     target_chat_id = context.user_data["album_destination_chat_id"]
-    current_album_id = context.user_data.get("current_album_id")
     album_buffer = context.user_data.get("album_buffer", {})
-    items = album_buffer.get(current_album_id, [])
+    ready_album_ids = list(context.user_data.get("ready_album_ids", []))
     custom_caption = context.user_data.get("current_caption", "")
 
-    if not current_album_id or len(items) < 2:
+    if not ready_album_ids:
         await context.bot.send_message(chat_id=chat_id, text=MESSAGES["no_album_detected"])
         return
 
-    for item in items:
-        try:
-            caption_to_send = custom_caption
+    total_items_sent = 0
 
-            if item["type"] == "photo":
-                await context.bot.send_photo(
+    for album_id in ready_album_ids:
+        items = album_buffer.get(album_id, [])
+
+        if len(items) < 2:
+            continue
+
+        for item in items:
+            try:
+                caption_to_send = custom_caption
+
+                if item["type"] == "photo":
+                    await context.bot.send_photo(
+                        chat_id=target_chat_id,
+                        photo=item["file_id"],
+                        caption=caption_to_send if caption_to_send else None
+                    )
+                elif item["type"] == "video":
+                    await context.bot.send_video(
+                        chat_id=target_chat_id,
+                        video=item["file_id"],
+                        caption=caption_to_send if caption_to_send else None
+                    )
+
+                total_items_sent += 1
+
+            except TelegramError as e:
+                logger.error(f"Failed to send split item from album {album_id}: {e}")
+                await context.bot.send_message(
                     chat_id=target_chat_id,
-                    photo=item["file_id"],
-                    caption=caption_to_send if caption_to_send else None
+                    text=f"⚠️ حدث خطأ أثناء إرسال عنصر من الألبوم {album_id}: {e}"
                 )
-            elif item["type"] == "video":
-                await context.bot.send_video(
-                    chat_id=target_chat_id,
-                    video=item["file_id"],
-                    caption=caption_to_send if caption_to_send else None
-                )
-        except TelegramError as e:
-            logger.error(f"Failed to send split item: {e}")
-            await context.bot.send_message(
-                chat_id=target_chat_id,
-                text=f"⚠️ حدث خطأ أثناء إرسال عنصر من الألبوم: {e}"
-            )
 
-        await asyncio.sleep(0.4)
+            await asyncio.sleep(0.4)
 
-    # تنظيف البيانات
-    context.user_data["album_buffer"].pop(current_album_id, None)
-    context.user_data["current_album_id"] = None
+        # تنظيف هذا الألبوم بعد الانتهاء منه
+        album_buffer.pop(album_id, None)
 
-    processing_task = context.user_data.get("processing_tasks", {}).pop(current_album_id, None)
-    if processing_task and not processing_task.done():
-        processing_task.cancel()
+        processing_task = context.user_data.get("processing_tasks", {}).pop(album_id, None)
+        if processing_task and not processing_task.done():
+            processing_task.cancel()
 
-    logger.info(f"Successfully split album {current_album_id} into {len(items)} separate messages.")
-    await context.bot.send_message(chat_id=chat_id, text=MESSAGES["done_success"])
+        logger.info(f"Successfully split album {album_id} into {len(items)} separate messages.")
+
+    # حذف كل الألبومات الجاهزة التي تم معالجتها
+    context.user_data["ready_album_ids"] = []
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"{MESSAGES['done_success']}\n\n📦 عدد العناصر المرسلة: {total_items_sent}"
+    )
 
 
 # --- دوال مساعدة ---
@@ -395,15 +406,16 @@ async def delete_messages_from_queue(context: ContextTypes.DEFAULT_TYPE, chat_id
 async def reset_album(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await initialize_user_data(context, update.effective_chat.id)
 
-    # إلغاء جميع المهام المؤقتة
     for task in context.user_data.get("processing_tasks", {}).values():
         if task and not task.done():
             task.cancel()
 
     context.user_data["album_buffer"] = {}
-    context.user_data["current_album_id"] = None
     context.user_data["processing_started"] = False
     context.user_data["processing_tasks"] = {}
+    context.user_data["ready_album_ids"] = []
+    context.user_data["caption_prompt_shown"] = False
+    context.user_data.pop("current_caption", None)
 
     await update.message.reply_text(MESSAGES["queue_cleared"])
     await delete_messages_from_queue(context, update.effective_chat.id)
@@ -425,9 +437,10 @@ async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             task.cancel()
 
     context.user_data["album_buffer"] = {}
-    context.user_data["current_album_id"] = None
     context.user_data["processing_started"] = False
     context.user_data["processing_tasks"] = {}
+    context.user_data["ready_album_ids"] = []
+    context.user_data["caption_prompt_shown"] = False
     context.user_data.pop("current_caption", None)
 
     await delete_messages_from_queue(context, chat_id)
